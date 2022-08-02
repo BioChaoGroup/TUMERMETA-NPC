@@ -1,0 +1,974 @@
+---
+title: "Random Forest"
+output:
+   html_notebook:
+     code_fold: hide
+  
+---
+
+```{r setup,include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load fucntions
+library(dplyr)
+library(ggtern)
+library(optmatch)
+library(pROC)
+source("./Functions.R")
+
+# Global variance for write or not
+do.write <- F
+# Outputdir
+outdir <- "../../Result/RandomForest/NPCpairmatch/"
+if(!dir.exists(outdir)){dir.create(outdir)}
+if(!dir.exists(paste0(outdir,"model/"))){dir.create(paste0(outdir,"model/"))}
+```
+
+# Loading
+```{r}
+pub.MGS2.prf <- read.table("../../Result/01.Profile/MGS.V2.Caucasian.219.profile")
+pub.KO.prf <- read.table("../../Result/01.Profile/Pub_Caucasian/Caucasian.ko.abun.profile")
+pub.phe <- read.csv("../../Result/Phenotype/pub.cc.phe.csv")
+
+ko.prf <- read.table("../../Result/01.Profile/KO.profile")
+sp.prf <- read.table("../../Result/01.Profile/MGS_V2.profile")
+mgs.V2.anno <- read.table("../../Result/01.Profile/00.IGC.MGS.annotation",sep="\t",header=T)
+mgs.V2.anno$mgs.V2 <- sub(":",".",mgs.V2.anno$X)
+mgs.V2.anno2 <- mgs.V2.anno[,c(8,2,3)]
+
+#FDNA.NS,FDNA.NPC.pick2,FDNA.NPC.pick3
+load("../../Result/TimeSeries/NPC/FDNA.NPC.picks.RData")
+```
+
+# Cross-validation
+
+Training set came from randomly picked PRs (n=8) and phenotype pair-matched SD and PD.
+
+8 folds for each cross-validation process.
+
+And each try repeat 100 times.
+
+> Cross-validation performed on HPC. Here we just load the results and find the best one.
+
+#decide training set and testing set
+```{r}
+#Load HLA.mdat
+phe.HLA.csv <- read.csv("../../Result/HLA/57_PD1_NPC.2020-4-14.csv")
+#phe.HLA.csv$TMB.grp <- ifelse(phe.HLA.csv$TMB>median(phe.HLA.csv$TMB),"high","low")
+phe.HLA.csv$TMB.grp <- ifelse(phe.HLA.csv$TMBnew>median(phe.HLA.csv$TMBnew[!is.na(phe.HLA.csv$TMBnew)]),"high","low")
+HLA.mdat<-phe.HLA.csv
+HLA.mdat.tmblow_HLAE_MT.PID <- as.character((HLA.mdat%>%filter(TMB.grp=="low"&HLAe.SNP=="M/T"))$PID)
+#HLA.mdat.tmblow_HLAE_MT.PID <- as.character((HLA.mdat%>%filter(TMB.grp=="low"&HLA_E=="M/T"))$PID)
+#HLA.mdat.tmblow_HLAE_MT.PID <- as.character((HLA.mdat%>%filter(TMB.grp=="high"&(HLAe.SNP=="M/M"|HLAe.SNP=="T/T")))$PID)
+
+##
+M0.phe <- FDNA.NPC.pick3%>%filter(Ms=="M0"&ATB02==F&!PID%in%HLA.mdat.tmblow_HLAE_MT.PID)
+#M0.phe <- FDNA.NPC.pick3%>%filter(Ms=="M0"&ATB02==F&PID%in%HLA.mdat.tmblow_HLAE_MT.PID)
+M0.PID <- as.character(M0.phe$PID)
+M0.phe$SD2 <- as.factor(ifelse(M0.phe$BE3=="SD","SD","PDPR"))
+
+set.seed(1)
+#PR.train.PID <- as.character(sort((M0.phe%>%filter(BE3=="PR"))$PID)[sample(1:12,8)])
+PR.train.PID <- as.character(sort((M0.phe%>%filter(BE3=="PR"))$PID)[sample(1:6,4)])
+
+merge.SD.dat <- rbind(
+  cbind(set=1,M0.phe%>%filter(PID%in%PR.train.PID)),
+  cbind(set=0,M0.phe%>%filter(BE3=="SD")))
+#mat.SD <- pairmatch(set~Treatment+Gender+Age+BMI,controls = 2, data=merge.SD.dat)
+mat.SD <- pairmatch(set~Treatment+Gender+Age,controls = 2, data=merge.SD.dat)
+merge.PD.dat <- rbind(
+  cbind(set=1,M0.phe%>%filter(PID%in%PR.train.PID)),
+  cbind(set=0,M0.phe%>%filter(BE3=="PD")))
+#mat.PD <- pairmatch(set~Treatment+Gender+Age+BMI,controls = 1, data=merge.PD.dat)
+mat.PD <- pairmatch(set~Treatment+Gender+Age,controls = 1, data=merge.PD.dat)
+
+merge.dat <- unique(rbind(
+  merge.SD.dat[which(!is.na(mat.SD)),],
+  merge.PD.dat[which(!is.na(mat.PD)),]))
+
+train.PID <- as.character(merge.dat$PID)
+
+
+train.phe <- M0.phe%>%filter(PID%in%train.PID)
+test.phe  <- M0.phe%>%filter(!PID%in%train.PID)
+
+#
+PDPR.train.phe <- M0.phe%>%filter(PID%in%train.PID&BE3!="SD")
+PDPR.train.phe$BE3 <- droplevels(PDPR.train.phe$BE3)
+PDPR.test.phe  <- M0.phe%>%filter(!PID%in%train.PID&BE3!="SD")
+
+#
+method <- 'all'
+method <- "cv"
+
+table(train.phe$BE3,train.phe$Treatment)
+table(train.phe$BE3,train.phe$Gender)
+#ggplot(train.phe,aes(x=Age,y=BMI,color=BE3,shape=Gender)) + 
+ggplot(train.phe,aes(x=Age,y=E,color=BE3,shape=Gender)) + 
+  geom_point() + stat_ellipse(aes(group=BE3))
+```
+
+**function**
+```{r}
+#
+comb.rf.model.pred <- function(rf1,rf2,df=NULL,phe=NULL){
+  #makesure the rownames are corresponding to each matrix
+  if(is.null(df)){
+    pred1 <- predict(rf1,type="prob")
+    pred2 <- predict(rf2,type="prob")
+    predc <- merge(pred1,pred2,by="row.names",all.x=T)
+    for(i in 1:nrow(predc)){
+      if(length(which(is.na(predc[i,4:5])))==2){
+        predc[i,4:5] <- as.numeric(predc[i,2])/2
+      }
+    }
+    rownames(predc) <- predc$Row.names
+    predc <- predc[,-1]
+    return(predc)
+  }else{
+    pred1 <- predict(rf1,df,type="prob")
+    pred2 <- predict(rf2,df,type="prob")
+    preds <- cbind(SD=pred1[,"SD"],
+               raw.PD=pred2[,"PD"],PD=pred1[,"PDPR"]*pred2[,"PD"],
+               raw.PR=pred2[,"PR"],PR=pred1[,"PDPR"]*pred2[,"PR"]
+               )
+    rownames(preds) <- rownames(df)
+    if(!is.null(phe)){
+      pred.df <- merge(phe,preds,by="row.names")
+      auc.PD <- auc(pred.df$BE3=="PD",pred.df$PD,plot=F)
+      auc.SD <- auc(pred.df$BE3=="SD",pred.df$SD,plot=F)
+      auc.PR <- auc(pred.df$BE3=="PR",pred.df$PR,plot=F)
+      auc.df <- rbind(
+        data.frame(pred="PD",auc=as.numeric(auc.PD),attr(auc.PD,"roc")[2],attr(auc.PD,"roc")[3]),
+        data.frame(pred="SD",auc=as.numeric(auc.SD),attr(auc.SD,"roc")[2],attr(auc.SD,"roc")[3]),
+        data.frame(pred="PR",auc=as.numeric(auc.PR),attr(auc.PR,"roc")[2],attr(auc.PR,"roc")[3])
+      )
+      auc.df <- auc.df[rev(order(auc.df$specificities)),]
+      conf.PR <- 1 - mean(rf2$err.rate[,"PR"])
+      conf.PD <- 1 - mean(rf2$err.rate[,"PD"])
+      conf.SD <- 1 - mean(rf1$err.rate[,"SD"])
+      
+      return(list(pred=pred.df,auc=auc.df,conf.PR=conf.PR,conf.PD=conf.PD,conf.SD=conf.SD))
+    }else{
+      return(preds)
+    }
+  }
+}
+```
+
+### MGS only
+
+```{r}
+#opt1
+mgs.rf.tag <- "Ms0.n8_00.MGS.BE3"
+#sum.sign.anno <- read.csv("../../Result/TEST/timeSeries/mgs.anova.sum.ms.sgin.anno.csv",row.names = 1)
+sum.sign.anno <- read.csv("../../Result/TEST/timeSeries/NPC.mgs.anova.sum.ms.sgin.anno.csv",row.names = 1)
+sign.MGS <- as.character(sum.sign.anno$mgs.V2)
+#opt2
+#mgs.rf.tag <- "MsMd.f8_00.MGS"
+mgs.rf.tag <- "MsMd.f8_00.MGS.anova"
+mgs.rf.tag <- "MsMd.f8_01.MGS.anova" #45
+
+
+#phMd.r.sum.sign.anno <- read.csv("../../Result/TEST/timeSeries/mgs.anova.sum.ms.enriched.anno.csv",row.names=1)
+
+phMd.r.sum.sign.anno <- read.csv("../../Result/TEST/timeSeries/NPC.mgs.anova.sum.ms.sgin.anno.csv",row.names=1)
+sign.MGS <- as.character(phMd.r.sum.sign.anno$mgs.V2) 
+
+#####
+choose.mgs.prf <- sp.prf[sign.MGS,sort(colnames(sp.prf))]
+####
+mgs.rf.dat <- merge(train.phe[,c("DNAID","SD2")],t(choose.mgs.prf),by.x="DNAID",by.y="row.names")
+rownames(mgs.rf.dat) <- mgs.rf.dat$DNAID
+mgs.rf.dat <- mgs.rf.dat[,-1]
+#DPPR
+PDPR.mgs.rf.dat <- merge(data.frame(DNAID=colnames(choose.mgs.prf),t(choose.mgs.prf)),
+    PDPR.train.phe[,c("DNAID","BE2")],by="DNAID")
+rownames(PDPR.mgs.rf.dat) <- PDPR.mgs.rf.dat$DNAID
+PDPR.mgs.rf.dat <- PDPR.mgs.rf.dat[,-1]
+
+#####CV
+MGS.combo.file <- paste0(outdir,"model/",mgs.rf.tag,".combo.train.RData")
+save(choose.mgs.prf,train.phe,PDPR.train.phe,file = "../../Result/RandomForest/NPCpairmatch/model/tmp.RData")
+
+#load(paste0("../../Result/RandomForest/NPCpairmatch/model/tmp.RData")) 
+
+if(file.exists(MGS.combo.file)){
+  load(MGS.combo.file)
+}else{
+  mgs.SD2.train <- train.module3(
+    choose.mgs.prf,train.phe,
+    #"DNAID","SD2",size=8,max.cv=0.2,max.marker=30,maxtry=1,
+    "DNAID","SD2",size=4,max.cv=0.3,max.marker=30,maxtry=5,
+    thread=60,rept=999,cv.fold=8,step=1.1,impGrp=NULL,sam=F,type="FORK",
+    candy=NULL,pick=NULL,ex.PID=NULL)
+  #
+  mgs.DPRP.train <- train.module3(
+    choose.mgs.prf,PDPR.train.phe,
+    #"DNAID","BE3",size=8,max.cv=0.2,max.marker=30,maxtry=1,
+    "DNAID","BE3",size=4,max.cv=0.3,max.marker=30,maxtry=5,
+    thread=60,rept=999,cv.fold=8,step=1.1,impGrp=NULL,sam=F,type="FORK",
+    candy=NULL,pick=NULL,ex.PID=NULL)
+  #
+  save(mgs.SD2.train, mgs.DPRP.train, file=MGS.combo.file)
+}
+
+
+
+#performance visual
+mgs.train.rf <- mgs.SD2.train$rf
+plot.f1(mgs.SD2.train)
+mgs.DPPR.train.rf <- mgs.DPRP.train$rf
+plot.f1(mgs.DPRP.train)
+#step2: train set performance
+
+mgs.tr.mtx <- t(choose.mgs.prf[,which(colnames(choose.mgs.prf)%in%train.phe$DNAID)])
+rownames(M0.phe) <- M0.phe$DNAID
+mgs.tr.df <- comb.rf.model.pred(mgs.train.rf,mgs.DPPR.train.rf,mgs.tr.mtx,M0.phe)
+mgs.tr.df.pred <- mgs.tr.df$pred
+mgs.tr.df.auc <- mgs.tr.df$auc
+
+
+mgs.p1 <- ggtern(data=mgs.tr.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="mgs training set")
+mgs.p1
+
+mgs.p3 <- ggplot(mgs.tr.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(mgs.tr.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+mgs.p3
+
+#step3: test set performance
+
+mgs.test.mtx <- t(choose.mgs.prf[,-which(colnames(choose.mgs.prf)%in%train.phe$DNAID)])
+mgs.test.df <- comb.rf.model.pred(mgs.train.rf,mgs.DPPR.train.rf,mgs.test.mtx,M0.phe)
+mgs.tt.df.pred <- mgs.test.df$pred
+mgs.tt.df.auc <- mgs.test.df$auc
+
+mgs.p2 <- ggtern(data=mgs.tt.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="mgs testing set")
+mgs.p2
+
+mgs.p4 <- ggplot(mgs.tt.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(mgs.tt.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+mgs.p4
+
+```
+
+**added: Validated by Caucasian cohort
+```{r}
+#step3: test set performance
+ca.phe <- pub.phe%>%filter(cohort=="Caucasian"&CTgrp=="baseline"&Tumor_Type=="NSCLC"&ATB==F&BestEvaluation!="DD")
+levels(ca.phe$BestEvaluation) <- c("PD","PD","PR","SD")
+ca.phe$BE3 <- droplevels(ca.phe$BestEvaluation)
+rownames(ca.phe) <- ca.phe$DNAID
+ca.mgs.test.mtx <- t(pub.MGS2.prf[,which(colnames(pub.MGS2.prf)%in%ca.phe$DNAID)])
+ca.mgs.test.df <- comb.rf.model.pred(mgs.train.rf,mgs.DPPR.train.rf,ca.mgs.test.mtx,ca.phe)
+ca.mgs.tt.df.pred <- ca.mgs.test.df$pred
+ca.mgs.tt.df.auc <- ca.mgs.test.df$auc
+
+ca.mgs.p2 <- ggtern(data=ca.mgs.tt.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="ca.mgs testing set")
+ca.mgs.p2
+
+ca.mgs.p4 <- ggplot(ca.mgs.tt.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(ca.mgs.tt.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+ca.mgs.p4
+
+```
+
+### KO only
+
+```{r}
+#Ms0
+ko.rf.tag <- "Ms0.f8_00.ko.BE3"
+#select.markers
+load("../../Result/ReportScore/MsSign_NPC_BE3/select.markers.RData")
+ko.marker.name <- unique(as.character(select.markers$KO))
+#M0RAND
+#Ms0
+##ko.rf.tag <- "MsMd.f8_00.ko.BE3"
+##ko.rf.tag <- "MsMd.f8_01.ko.BE3" #same, for check
+##load("../../Result/ReportScore/M0RAND_NPC_BE3/select.markers.RData")
+#ko.marker.name <- unique(as.character(select.markers$KO))
+ko.freq <- ddply(select.markers,"KO",summarise,freq=length(which(table(VS)>0)))
+ko.marker.name<- as.character((ko.freq%>%filter(freq>0))$KO)
+
+###
+choose.ko.prf <- ko.prf[ko.marker.name,sort(colnames(ko.prf))]
+
+ko.rf.dat <- merge(data.frame(DNAID=colnames(choose.ko.prf),t(choose.ko.prf)),
+                train.phe[,c("DNAID","BE2")],by="DNAID")
+rownames(ko.rf.dat) <- ko.rf.dat$DNAID
+ko.rf.dat <- ko.rf.dat[,-1]
+
+#PDPR
+PDPR.ko.rf.dat <- merge(data.frame(DNAID=colnames(choose.ko.prf),t(choose.ko.prf)),
+    PDPR.train.phe[,c("DNAID","BE2")],by="DNAID")
+rownames(PDPR.ko.rf.dat) <- PDPR.ko.rf.dat$DNAID
+PDPR.ko.rf.dat <- PDPR.ko.rf.dat[,-1]
+
+ko.combo.file <- paste0(outdir,"model/",ko.rf.tag,".combo.train.RData")
+save(choose.ko.prf,train.phe,PDPR.train.phe,file = "../../Result/RandomForest/NPCpairmatch/model/KOtmp.RData")
+if(file.exists(ko.combo.file)){
+  load(ko.combo.file) # in cluster
+}else{
+  #
+  ko.SD2.train <- train.module3(
+    choose.ko.prf,train.phe,
+    #"DNAID","SD2",size=8,max.cv=0.2,max.marker=30,maxtry=1,ntree=500,
+    "DNAID","SD2",size=4,max.cv=0.2,max.marker=30,maxtry=1,ntree=500,
+    thread=60,rept=999,cv.fold=8,step=1.2,impGrp=NULL,sam=F,type="FORK",
+    candy=NULL,pick=NULL,ex.PID=NULL)
+  #
+  ko.DPRP.train <- train.module3(
+    choose.ko.prf,PDPR.train.phe,
+    #"DNAID","BE3",size=8,max.cv=0.2,max.marker=30,maxtry=1,ntree=500,
+    "DNAID","SD2",size=4,max.cv=0.3,max.marker=30,maxtry=5,ntree=500,
+    thread=60,rept=999,cv.fold=8,step=1.2,impGrp=NULL,sam=F,type="FORK",
+    candy=NULL,pick=NULL,ex.PID=NULL)
+  #
+  save(ko.SD2.train, ko.DPRP.train, file=ko.combo.file)
+}
+
+#performance visual
+
+ko.train.rf <- ko.SD2.train$rf
+plot.f1(ko.SD2.train)
+ko.DPPR.train.rf <- ko.DPRP.train$rf
+plot.f1(ko.DPRP.train)
+#####
+#step2: train set performance
+
+ko.tr.mtx <- t(choose.ko.prf[,which(colnames(choose.ko.prf)%in%train.phe$DNAID)])
+rownames(M0.phe) <- M0.phe$DNAID
+ko.tr.df <- comb.rf.model.pred(ko.train.rf,ko.DPPR.train.rf,ko.tr.mtx,M0.phe)
+ko.tr.df.pred <- ko.tr.df$pred
+ko.tr.df.auc <- ko.tr.df$auc
+
+
+ko.p1 <- ggtern(data=ko.tr.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="ko training set")
+ko.p1
+
+ko.p3 <- ggplot(ko.tr.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(ko.tr.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+ko.p3
+
+#step3: test set performance
+
+ko.test.mtx <- t(choose.ko.prf[,-which(colnames(choose.ko.prf)%in%train.phe$DNAID)])
+ko.test.df <- comb.rf.model.pred(ko.train.rf,ko.DPPR.train.rf,ko.test.mtx,M0.phe)
+ko.tt.df.pred <- ko.test.df$pred
+ko.tt.df.auc <- ko.test.df$auc
+
+ko.p2 <- ggtern(data=ko.tt.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="ko testing set")
+ko.p2
+
+ko.p4 <- ggplot(ko.tt.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(ko.tt.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+ko.p4
+
+```
+**added: Validated by Caucasian cohort
+```{r}
+#step3: test set performance
+ca.phe <- pub.phe%>%filter(cohort=="Caucasian"&CTgrp=="baseline"&Tumor_Type=="NSCLC"&ATB==F&BestEvaluation!="DD")
+levels(ca.phe$BestEvaluation) <- c("PD","PD","PR","SD")
+ca.phe$BE3 <- droplevels(ca.phe$BestEvaluation)
+rownames(ca.phe) <- ca.phe$DNAID
+ca.ko.test.mtx <- t(pub.KO.prf[,which(colnames(pub.KO.prf)%in%ca.phe$DNAID)])
+ca.ko.test.df <- comb.rf.model.pred(ko.train.rf,ko.DPPR.train.rf,ca.ko.test.mtx,ca.phe)
+ca.ko.tt.df.pred <- ca.ko.test.df$pred
+ca.ko.tt.df.auc <- ca.ko.test.df$auc
+
+ca.ko.p2 <- ggtern(data=ca.ko.tt.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="ca.ko testing set")
+ca.ko.p2
+
+ca.ko.p4 <- ggplot(ca.ko.tt.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(ca.ko.tt.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+ca.ko.p4
+
+```
+
+
+# combine mgs and ko
+
+```{r}
+cmk.prf <- rbind(choose.mgs.prf,choose.ko.prf)
+cmk.rf.dat <- merge(data.frame(DNAID=colnames(choose.ko.prf),t(choose.mgs.prf),t(choose.ko.prf)),
+                train.phe[,c("DNAID","SD2")],by="DNAID")
+rownames(cmk.rf.dat) <- cmk.rf.dat$DNAID
+cmk.rf.dat <- cmk.rf.dat[,-1]
+
+cmk.rf.tag <- "MsMd.f8_00.cmk.BE3" # contained wilcox MGS markers
+cmk.rf.tag <- "MsMd.f8_01.cmk.BE3" # contained anova MGS markers
+###
+#DPPR
+PDPR.cmk.rf.dat <- merge(data.frame(DNAID=colnames(cmk.prf),t(cmk.prf)),
+    PDPR.train.phe[,c("DNAID","BE2")],by="DNAID")
+rownames(PDPR.cmk.rf.dat) <- PDPR.cmk.rf.dat$DNAID
+PDPR.cmk.rf.dat <- PDPR.cmk.rf.dat[,-1]
+
+save(cmk.prf,train.phe,PDPR.train.phe,file = "../../Result/RandomForest/NPCpairmatch/model/combinetmp.RData")
+#####CV
+cmk.combo.file <- paste0(outdir,"/model/",cmk.rf.tag,".combo.train.RData")
+if(file.exists(cmk.combo.file)){
+  load(cmk.combo.file)
+}else{
+  #
+  cmk.SD2.train <- train.module3(
+    cmk.prf,train.phe,
+    #"DNAID","SD2",size=8,max.cv=0.2,max.marker=30,maxtry=1,ntree=500,
+    "DNAID","SD2",size=4,max.cv=0.2,max.marker=30,maxtry=1,ntree=500,
+    thread=60,rept=999,cv.fold=8,step=1.2,impGrp=NULL,sam=F,type="FORK",
+    candy=NULL,pick=NULL,ex.PID=NULL)
+  #
+  cmk.DPRP.train <- train.module3(
+    cmk.prf,PDPR.train.phe,
+    #"DNAID","BE3",size=8,max.cv=0.2,max.marker=30,maxtry=1,ntree=500,
+    #"DNAID","BE3",size=4,max.cv=0.2,max.marker=30,maxtry=1,ntree=500,
+    "DNAID","BE3",size=4,max.cv=0.2,max.marker=30,maxtry=1,ntree=500,
+    #thread=60,rept=999,cv.fold=8,step=1.2,impGrp=NULL,sam=F,type="FORK",
+    thread=60,rept=999,cv.fold=5,step=1.2,impGrp=NULL,sam=F,type="FORK",
+    candy=NULL,pick=NULL,ex.PID=NULL)
+  #
+  save(cmk.SD2.train, cmk.DPRP.train, file=cmk.combo.file)
+}
+
+#performance visual
+cmk.train.rf <- cmk.SD2.train$rf
+plot.f1(cmk.SD2.train)
+cmk.DPPR.train.rf <- cmk.DPRP.train$rf
+plot.f1(cmk.DPRP.train)
+#####
+
+#step2: train set performance
+
+cmk.tr.mtx <- t(cmk.prf[,which(colnames(cmk.prf)%in%train.phe$DNAID)])
+rownames(M0.phe) <- M0.phe$DNAID
+cmk.tr.df <- comb.rf.model.pred(cmk.train.rf,cmk.DPPR.train.rf,cmk.tr.mtx,M0.phe)
+cmk.tr.df.pred <- cmk.tr.df$pred
+cmk.tr.df.auc <- cmk.tr.df$auc
+
+
+cmk.p1 <- ggtern(data=cmk.tr.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="cmk training set")
+cmk.p1
+
+cmk.p3 <- ggplot(cmk.tr.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(cmk.tr.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+cmk.p3
+
+#step3: test set performance
+
+cmk.test.mtx <- t(cmk.prf[,-which(colnames(cmk.prf)%in%train.phe$DNAID)])
+cmk.test.df <- comb.rf.model.pred(cmk.train.rf,cmk.DPPR.train.rf,cmk.test.mtx,M0.phe)
+cmk.tt.df.pred <- cmk.test.df$pred
+cmk.tt.df.auc <- cmk.test.df$auc
+
+cmk.p2 <- ggtern(data=cmk.tt.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="cmk testing set")
+cmk.p2
+
+cmk.p4 <- ggplot(cmk.tt.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(cmk.tt.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+cmk.p4
+
+```
+
+```{r}
+#ggsave(cmk.p0,width=8,height=4,file=paste0("../../Result/RandomForest/model/",cmk.rf.tag,".NPC.train.auc.raw.plot.pdf"))
+ggsave(cmk.p1,width=8,height=8,file=paste0("../../Result/RandomForest/model/",cmk.rf.tag,".NPC.train.ggtern.plot.pdf"))
+ggsave(cmk.p2,width=8,height=8,file=paste0("../../Result/RandomForest/model/",cmk.rf.tag,".NPC.test.ggtern.plot.pdf"))
+ggsave(cmk.p3,width=5,height=4,file=paste0("../../Result/RandomForest/model/",cmk.rf.tag,".NPC.train.auc.plot.pdf"))
+ggsave(cmk.p4,width=5,height=4,file=paste0("../../Result/RandomForest/model/",cmk.rf.tag,".NPC.test.auc.plot.pdf"))
+
+```
+
+
+# clinical preperation
+```{r}
+HLA.df <- HLA.mdat[,c("PID","TMBnew","HLAe.SNP")]
+HLA.df$HLA.E <- as.numeric(as.factor(HLA.mdat$HLAe.SNP)) -1 
+HLA.info<- read.csv("../../Result/HLA/Curated.HLA.TMB.20190101.csv")
+#HLA.mdat
+#load("../../Result/Phenotype/HLA.mdat.RData")
+#load("../../Result/Phenotype/NPC/FecalDNA.Rmd.RData")
+
+#HLA.mdat$ATB00<-F
+#HLA.mdat$ATB00 <- ifelse(HLA.mdat$ATB=="baseline",T,F)
+#HLA.mdat$ATB00[which(is.na(HLA.mdat$ATB00))] <- F
+
+m2.phe <- merge(M0.phe,HLA.df,by="PID")
+m0.phe <- merge(M0.phe,HLA.df,by="PID",all.x=T)
+m0.phe$TMB <- m0.phe$TMBnew
+m0.phe <- ddply(m0.phe,"Gender",transform,
+                TMB.fill=ifelse(is.na(TMB),median(TMB[which(!is.na(TMB))]),TMB),
+                HLA.E.fill=ifelse(is.na(HLA.E),median(HLA.E[which(!is.na(HLA.E))]),HLA.E))
+A0.phe <- merge(FDNA.NPC.pick3%>%filter(Ms=="M0"),HLA.df,by="PID",all.x=T)
+A0.phe$TMB <- A0.phe$TMBnew
+A0.phe <- ddply(A0.phe,"Gender",transform,
+                TMB.fill=ifelse(is.na(TMB),median(TMB[which(!is.na(TMB))]),TMB),
+                HLA.E.fill=ifelse(is.na(HLA.E),median(HLA.E[which(!is.na(HLA.E))]),HLA.E))
+
+A0.PID <- as.character(A0.phe$PID)
+
+PR.train.PID <- as.character(sort((A0.phe%>%filter(BE3=="PR"))$PID)[1:8])
+
+merge.SD.dat <- rbind(
+  cbind(set=1,A0.phe%>%filter(PID%in%PR.train.PID)),
+  cbind(set=0,A0.phe%>%filter(BE3=="SD")))
+#mat.SD <- pairmatch(set~Treatment+Gender+Age+BMI,controls = 1, data=merge.SD.dat)
+mat.SD <- pairmatch(set~Treatment+Gender+Age+E,controls = 1, data=merge.SD.dat)
+
+merge.PD.dat <- rbind(
+  cbind(set=1,A0.phe%>%filter(PID%in%PR.train.PID)),
+  cbind(set=0,A0.phe%>%filter(BE3=="PD")))
+#mat.PD <- pairmatch(set~Treatment+Gender+Age+BMI,controls = 1, data=merge.PD.dat)
+mat.PD <- pairmatch(set~Treatment+Gender+Age,controls = 1, data=merge.PD.dat)
+
+A0.merge.dat <- unique(rbind(
+  merge.SD.dat[which(!is.na(mat.SD)),],
+  merge.PD.dat[which(!is.na(mat.PD)),]))
+
+A0.train.PID <- as.character(A0.merge.dat$PID)
+
+A0.train.phe <- A0.phe%>%filter(PID%in%A0.train.PID)
+A0.test.phe  <- A0.phe%>%filter(!PID%in%A0.train.PID)
+
+#
+m0.train.phe <- m0.phe%>%filter(PID%in%train.PID)
+m0.test.phe  <- m0.phe%>%filter(!PID%in%train.PID)
+
+#
+table(A0.merge.dat$BE3,A0.merge.dat$Treatment)
+table(A0.merge.dat$BE3,A0.merge.dat$Gender)
+table(A0.merge.dat$BE3,A0.merge.dat$ATB02)
+ggplot(merge.dat,aes(x=Age,color=BE3,linetype=Gender)) + 
+  geom_density() + theme_bw()
+#ggplot(merge.dat,aes(x=BMI,color=BE3,linetype=Gender)) + 
+ggplot(merge.dat,aes(x=E,color=BE3,linetype=Gender)) + 
+  geom_density() + theme_bw()
+#ggplot(merge.dat,aes(x=Age,y=BMI,color=BE3,shape=Gender)) + 
+ggplot(merge.dat,aes(x=Age,y=E,color=BE3,shape=Gender)) + 
+ #stat_density2d(h = c(5,10),n=10,alpha=.3) +
+  stat_ellipse(aes(group=BE3)) +  
+  geom_point() + theme_bw()
+
+```
+**clnical model (m0)**
+
+```{r}
+#HLA.mdat$EGFR[which(is.na(HLA.mdat$EGFR))] <- "-"
+#HLA.mdat$KRAS[which(is.na(HLA.mdat$KRAS))] <- "-"
+#HLA.mdat$ALK[which(is.na(HLA.mdat$ALK))] <- "-"
+rownames(HLA.mdat) <- HLA.mdat$PID
+HLA.mdat$BE3<-HLA.mdat$BestEvaluation
+HLA.mdat$SD <- as.factor(ifelse(HLA.mdat$BE3=="SD","SD","PDPR"))
+train.HLA.mdat <- HLA.mdat[which(rownames(HLA.mdat)%in%train.phe$PID),]
+#test.HLA.mdat <- HLA.mdat[-which(rownames(HLA.mdat)%in%train.phe$PID|HLA.mdat$ATB02==T),] 
+test.HLA.mdat <- HLA.mdat[-which(rownames(HLA.mdat)%in%train.phe$PID),]
+test2.HLA.mdat <- HLA.info%>%filter(grepl("Q",PID)&Tumor=="NPC"&!is.na(TMB))
+
+train.HLA.mdat <- train.HLA.mdat%>%filter(!is.na(TMBnew))
+rownames(train.HLA.mdat) <- train.HLA.mdat$PID
+tmp.df <- train.HLA.mdat%>%filter(BE3!="SD")
+#tmp.df <- train.HLA.mdat%>%filter(BE3!="SD"&!is.na(TMBnew))
+tmp.df$BE3 <- droplevels(tmp.df$BE3)
+#train.mod1 <- randomForest(BE3~EGFR+KRAS+ALK+TMB,tmp.df)
+#train.mod2 <- randomForest(SD~EGFR+KRAS+ALK+TMB,train.HLA.mdat)
+train.mod1 <- randomForest(BE3~TMBnew+TNB,tmp.df)
+train.mod2 <- randomForest(SD~TMBnew+TNB,train.HLA.mdat)
+
+#step2: train set performance
+HLA.tr.mtx <- train.HLA.mdat
+rownames(M0.phe) <- M0.phe$PID
+HLA.tr.df <- comb.rf.model.pred(train.mod2,train.mod1,HLA.tr.mtx,M0.phe)
+HLA.tr.df.pred <- HLA.tr.df$pred
+HLA.tr.df.auc <- HLA.tr.df$auc
+
+HLA.p1 <- ggtern(data=HLA.tr.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="HLA training set")
+HLA.p1
+
+HLA.p3 <- ggplot(HLA.tr.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(HLA.tr.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+HLA.p3
+
+#step3: test set performance
+HLA.test.df <- comb.rf.model.pred(train.mod2,train.mod1,test.HLA.mdat,M0.phe)
+HLA.tt.df.pred <- HLA.test.df$pred
+HLA.tt.df.auc <- HLA.test.df$auc
+
+HLA.p2 <- ggtern(data=HLA.tt.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="HLA testing set")
+HLA.p2
+
+HLA.p4 <- ggplot(HLA.tt.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(HLA.tt.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+HLA.p4
+
+
+
+# combine cmk to HLA
+tt.cmk.test.df <- merge(cmk.tt.df.pred,HLA.tt.df.pred[,c("PID","PD","SD","PR")],by="PID",all.x=T)
+
+tt.cmk.test.df$PD <- (tt.cmk.test.df$PD.x * ifelse(is.na(tt.cmk.test.df$PD.y),1,tt.cmk.test.df$PD.y)) * cmk.test.df$conf.PR * HLA.test.df$conf.PR
+tt.cmk.test.df$SD <- (tt.cmk.test.df$SD.x * ifelse(is.na(tt.cmk.test.df$SD.y),1,tt.cmk.test.df$SD.y)) * cmk.test.df$conf.SD * HLA.test.df$conf.SD
+tt.cmk.test.df$PR <- (tt.cmk.test.df$PR.x * ifelse(is.na(tt.cmk.test.df$PR.y),1,tt.cmk.test.df$PR.y)) * cmk.test.df$conf.PD * HLA.test.df$conf.PD
+
+tmp.sum <- tt.cmk.test.df$PD + tt.cmk.test.df$PR + tt.cmk.test.df$SD
+tt.cmk.test.df$PD <- tt.cmk.test.df$PD/tmp.sum
+tt.cmk.test.df$SD <- tt.cmk.test.df$SD/tmp.sum
+tt.cmk.test.df$PR <- tt.cmk.test.df$PR/tmp.sum
+
+#########################################
+tt.cmk.p2 <- ggtern(data=tt.cmk.test.df,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="cmk testing set")
+tt.cmk.p2
+auc.PD <- auc(tt.cmk.test.df$BE3=="PD",tt.cmk.test.df$PD,plot=T)
+auc.SD <- auc(tt.cmk.test.df$BE3=="SD",tt.cmk.test.df$SD,plot=T)
+auc.PR <- auc(tt.cmk.test.df$BE3=="PR",tt.cmk.test.df$PR,plot=T)
+
+tt.cmk.test.auc.df <- rbind(
+  data.frame(pred="PD",auc=as.numeric(auc.PD),attr(auc.PD,"roc")[2],attr(auc.PD,"roc")[3]),
+  data.frame(pred="SD",auc=as.numeric(auc.SD),attr(auc.SD,"roc")[2],attr(auc.SD,"roc")[3]),
+  data.frame(pred="PR",auc=as.numeric(auc.PR),attr(auc.PR,"roc")[2],attr(auc.PR,"roc")[3])
+)
+tt.cmk.test.auc.df <- tt.cmk.test.auc.df[rev(order(tt.cmk.test.auc.df$specificities)),]
+
+
+tt.cmk.p4 <- ggplot(tt.cmk.test.auc.df,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+tt.cmk.p4
+
+if(do.write){
+  ggsave(tt.cmk.p2,width=8,height=8,file=paste0("../../Result/RandomForest/model/NPC.cmk_TMB.test.ggtern.plot.pdf"))
+  ggsave(tt.cmk.p4,width=5,height=4,file=paste0("../../Result/RandomForest/model/NPC.cmk_TMB.test.auc.plot.pdf"))
+}
+```
+
+```{r}
+#cli.info <- m0.phe[,c("DNAID","BE3","Age","Gender","BMI","Treatment","TMB.fill","HLA.E.fill")]
+cli.info <- m0.phe[,c("DNAID","Age","Gender","Treatment","TMB.fill","HLA.E.fill","BestDay","shan","Day","E","TMB.fill","HLA.E.fill")]
+rownames(cli.info) <- cli.info$DNAID
+cli.info$Treatment <- as.numeric(as.factor(cli.info$Treatment))
+
+cli.rf.tag <- "Ms0.f8_00.cli.BE3"
+#cli.rf.tag <- "Ms0.f8_01.cli.BE3" # anova
+
+cli.info$Gender <- as.numeric(cli.info$Gender) -1 
+cli.rf.dat <- cli.info[which(rownames(cli.info)%in%as.character(m0.train.phe$DNAID)),-1]
+cli.prf <- t(cli.info[,-c(1:2)])
+the.train.PID <- as.character(m0.train.phe$PID)
+###
+#DPPR
+PDPR.cli.rf.dat <- merge(data.frame(DNAID=colnames(cli.info),t(cli.info)),
+    PDPR.train.phe[,c("DNAID","BE2")],by="DNAID")
+rownames(PDPR.cli.rf.dat) <- PDPR.cli.rf.dat$DNAID
+PDPR.cli.rf.dat <- PDPR.cli.rf.dat[,-1]
+
+#####CV
+
+
+cli.combo.file <- paste0(outdir,"/model/",cli.rf.tag,".combo.train.RData")
+save(cli.prf,train.phe,PDPR.train.phe,file = "../../Result/RandomForest/NPCpairmatch/model/clitmp.RData")
+
+#load(paste0("../../Result/RandomForest/NPCpairmatch/model/clitmp.RData")) 
+#cli.train.phe<-train.phe[,c("DNAID","PID","Age","Gender","Treatment","Thr1st","BestEvaluation","PFS3m","PFS6m","BestDay","PD.Day","BE3","BE2","shan","CTgrp","E","SD2")]
+
+#cli.train.phe<-train.phe[,c("DNAID","PID","Age","Gender","Treatment","Thr1st","BestEvaluation","PFS3m","PFS6m","BestDay","PD.Day","BE3","BE2","shan","CTgrp","E","SD2")]
+cli.train.phe<-train.phe[,c("DNAID","duringDetail","Location","Age","Gender","Treatment","Thr1st","BestDay","shan","Day","E")]
+
+#cli.PDPR.train.phe<-PDPR.train.phe[,c("DNAID","PID","Age","Gender","Treatment","Thr1st","BestEvaluation","PFS3m","PFS6m","BestDay","PD.Day","BE3","BE2","shan","CTgrp","E","SD2")]
+cli.PDPR.train.phe<-PDPR.train.phe[,c("DNAID","duringDetail","Location","Age","Gender","Treatment","Thr1st","BestDay","shan","Day","E")]
+
+
+if(file.exists(cli.combo.file)){
+  load(cli.combo.file)
+}else{
+  #
+  cli.SD2.train <- train.module3(
+    #cli.prf,train.phe,
+    cli.prf,cli.train.phe,
+    "DNAID","SD2",size=8,max.cv=0.5,max.marker=30,maxtry=5,ntree=500,
+    thread=6,rept=80,cv.fold=8,step=1.2,impGrp=NULL,sam=F,type="FORK",
+    candy=NULL,pick=NULL,ex.PID=NULL)
+  #
+  cli.DPRP.train <- train.module3(
+    #cli.prf,PDPR.train.phe,
+    cli.prf,cli.PDPR.train.phe,
+    "DNAID","BE3",size=8,max.cv=0.5,max.marker=30,maxtry=5,ntree=500,
+    thread=6,rept=80,cv.fold=8,step=1.2,impGrp=NULL,sam=F,type="FORK",
+    candy=NULL,pick=NULL,ex.PID=NULL)
+  #
+  save(cli.SD2.train, cli.DPRP.train, file=cli.combo.file)
+}
+
+#performance visual
+cli.train.rf <- cli.SD2.train$rf
+plot.f1(cli.SD2.train)
+cli.DPPR.train.rf <- cli.DPRP.train$rf
+plot.f1(cli.DPRP.train)
+#####
+cli.train.p <- predict(cli.train.rf, type = "prob")
+cli.train.dat <- merge(train.phe,cli.train.p,by.x="DNAID",by.y="row.names")
+cli.train.dat <- merge(M0.phe,cli.train.p,by.x="DNAID",by.y="row.names")
+auc1 <- auc(cli.train.dat$SD2,cli.train.dat$SD,plot=T)
+
+#step2: pred PD / PR
+
+PDPR.cli.train.p <- predict(cli.DPPR.train.rf, type = "prob")
+PDPR.cli.train.dat <- merge(PDPR.train.phe,PDPR.cli.train.p,by.x="DNAID",by.y="row.names")
+PDPR.cli.train.dat <- merge(M0.phe,PDPR.cli.train.p,by.x="DNAID",by.y="row.names")
+auc2 <- auc(PDPR.cli.train.dat$BE2,PDPR.cli.train.dat$PR,plot=T)
+
+
+train.auc.df <- rbind(
+  data.frame(pred="SD",auc=as.numeric(auc1),attr(auc1,"roc")[2],attr(auc1,"roc")[3]),
+  data.frame(pred="PR",auc=as.numeric(auc2),attr(auc2,"roc")[2],attr(auc2,"roc")[3])
+)
+train.auc.df <- train.auc.df[rev(order(train.auc.df$specificities)),]
+
+ggplot(train.auc.df,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + facet_grid(.~pred) +
+  geom_text(data=unique(train.auc.df[,1:2]),aes(x=.9,y=.1,label=paste0("auc=",round(auc,2))))
+
+####
+cli.train.p <- comb.rf.model.pred(cli.train.rf,cli.DPPR.train.rf)
+cli.train.dat <- merge(train.phe,cli.train.p,by.x="DNAID",by.y="row.names")
+cli.train.dat <- merge(M0.phe,cli.train.p,by.x="DNAID",by.y="row.names")
+
+cli.test.mtx <- t(cli.prf[,-which(colnames(cli.prf)%in%cli.train.dat$DNAID)])
+cli.test.pred <- comb.rf.model.pred(cli.train.rf,cli.DPPR.train.rf,cli.test.mtx)
+cli.test.df <- merge(M0.phe,cli.test.pred,by.x="DNAID",by.y="row.names")
+
+ggtern(data=cli.train.dat,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="cli training set")
+
+ggtern(data=cli.test.df,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="cli testing set")
+
+```
+**clnical model (A0)**
+```{r}
+#cli.prf <- A0.phe[,c("DNAID","BE3","Age","Gender","BMI","TMB.fill","HLA.E.fill")]
+cli.prf <- A0.phe[,c("DNAID","BE3","Age","Gender","TMB.fill","HLA.E.fill","Treatment","BestEvaluation","PFS3m","PFS6m","BestDay","")]
+rownames(cli.prf) <- cli.prf$DNAID
+#clinical.dat$BMI <- clinical.dat$weight/(clinical.dat$height/100)^2
+cli.prf$Gender <- as.numeric(cli.prf$Gender) -1 
+
+cli.rf.dat <- cli.prf[which(rownames(cli.prf)%in%as.character(A0.train.phe$DNAID)),-1]
+
+cli.train.rf <- randomForest(BE3~.,data=cli.rf.dat, importance = T,proximity=T,ntree=5000,mtry=1,nPerm=10)
+cli.train.rf
+cli.train.p <- predict(cli.train.rf, type = "prob")
+cli.train.dat <- merge(A0.train.phe,cli.train.p,by.x="DNAID",by.y="row.names")
+
+cli.test.mtx <- merge(A0.test.phe[,c("DNAID"),F],cli.prf,by="DNAID")
+
+rownames(cli.test.mtx) <- cli.test.mtx$DNAID
+cli.test.mtx <- cli.test.mtx[,-1]
+cli.test.p <- predict(cli.train.rf,cli.test.mtx, type = "prob")
+cli.test.df <- merge(A0.test.phe,cli.test.p,by.x="DNAID",by.y="row.names")
+
+ggtern(data=cli.train.dat,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5) +
+  geom_point(size=2) + 
+  labs(title="clinical training set")
+
+ggtern(data=cli.test.df,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5) +
+  geom_point(size=2) + 
+  labs(title="clinical testing set")
+
+```
+#hm
+```{r}
+#
+hm.phe <- read.csv("../../Result/Phenotype/export.lymphocytes.20190611.csv")[,c(1:11,16)]
+hm0.phe <- hm.phe%>%filter(Timepoint=="M0"&PID!="P006"&!is.na(ALL)&Tumor_Type=="NPC")
+rownames(hm0.phe) <- as.character(hm0.phe$PID)
+hm0.phe <- merge(hm0.phe,m0.phe[,c("PID","BE3")])
+#hm0.phe <- hm0.phe[,-c(1:3)]
+train.hm0.mdat <- HLA.mdat[which(HLA.mdat$PID%in%train.phe$PID),]
+test.hm0.mdat <- HLA.mdat[-which(HLA.mdat$PID%in%train.phe$PID|HLA.mdat$ATB02==T),]
+
+tmp.df <- train.hm0.mdat[which(train.hm0.mdat$BE3!="SD"),]
+tmp.df$BE3 <- droplevels(tmp.df$BE3)
+train.mod1 <- randomForest(BE3~EGFR+KRAS+TMB,tmp.df)
+train.mod2 <- randomForest(SD~EGFR+KRAS+TMB,train.hm0.mdat)
+
+#
+#step2: train set performance
+rownames(M0.phe) <- M0.phe$PID
+hm0.tr.df <- comb.rf.model.pred(train.mod2,train.mod1,train.hm0.mdat,M0.phe)
+hm0.tr.df.pred <- hm0.tr.df$pred
+hm0.tr.df.auc <- hm0.tr.df$auc
+
+hm0.p1 <- ggtern(data=hm0.tr.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="hm0 training set")
+hm0.p1
+
+hm0.p3 <- ggplot(hm0.tr.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(hm0.tr.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+hm0.p3
+
+#step3: test set performance
+hm0.test.df <- comb.rf.model.pred(train.mod2,train.mod1,test.hm0.mdat,M0.phe)
+hm0.tt.df.pred <- hm0.test.df$pred
+hm0.tt.df.auc <- hm0.test.df$auc
+
+hm0.p2 <- ggtern(data=hm0.tt.df.pred,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="hm0 testing set")
+hm0.p2
+
+hm0.p4 <- ggplot(hm0.tt.df.auc,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(data=unique(hm0.tt.df.auc[,1:2]),aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+hm0.p4
+#
+
+tt.hm0.test.df <- merge(cmk.tt.df.pred,hm0.tt.df.pred[,c("PID","PD","SD","PR")],by="PID",all.x=T)
+tt.hm0.test.df$PD <- (tt.hm0.test.df$PD.x * ifelse(is.na(tt.hm0.test.df$PD.y),1,tt.hm0.test.df$PD.y * hm0.test.df$conf.PR)) * cmk.test.df$conf.PR
+tt.hm0.test.df$SD <- (tt.hm0.test.df$SD.x * ifelse(is.na(tt.hm0.test.df$SD.y),1,tt.hm0.test.df$SD.y * hm0.test.df$conf.SD)) * cmk.test.df$conf.SD
+tt.hm0.test.df$PR <- (tt.hm0.test.df$PR.x * ifelse(is.na(tt.hm0.test.df$PR.y),1,tt.hm0.test.df$PR.y * hm0.test.df$conf.PD)) * cmk.test.df$conf.PD
+
+###
+tmp.sum <- tt.hm0.test.df$PD + tt.hm0.test.df$PR + tt.hm0.test.df$SD
+tt.hm0.test.df$PD <- tt.hm0.test.df$PD/tmp.sum
+tt.hm0.test.df$SD <- tt.hm0.test.df$SD/tmp.sum
+tt.hm0.test.df$PR <- tt.hm0.test.df$PR/tmp.sum
+###
+tt.hm0.p2 <- ggtern(data=tt.hm0.test.df,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="cmk testing set")
+tt.hm0.p2
+auc.PD <- auc(tt.hm0.test.df$BE3=="PD",tt.hm0.test.df$PD,plot=T)
+auc.SD <- auc(tt.hm0.test.df$BE3=="SD",tt.hm0.test.df$SD,plot=T)
+auc.PR <- auc(tt.hm0.test.df$BE3=="PR",tt.hm0.test.df$PR,plot=T)
+
+tt.hm0.test.auc.df <- rbind(
+  data.frame(pred="PD",auc=as.numeric(auc.PD),attr(auc.PD,"roc")[2],attr(auc.PD,"roc")[3]),
+  data.frame(pred="SD",auc=as.numeric(auc.SD),attr(auc.SD,"roc")[2],attr(auc.SD,"roc")[3]),
+  data.frame(pred="PR",auc=as.numeric(auc.PR),attr(auc.PR,"roc")[2],attr(auc.PR,"roc")[3])
+)
+tt.hm0.test.auc.df <- tt.hm0.test.auc.df[rev(order(tt.hm0.test.auc.df$specificities)),]
+
+tt.hm0.p4 <- ggplot(tt.hm0.test.auc.df,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+tt.hm0.p4
+
+```
+
+#Adding
+```{r}
+# MGS + KO + HLA + HM
+t.hm0.tt.df.pred <- hm0.tt.df.pred
+colnames(t.hm0.tt.df.pred)[c(40,42,44)] <- c("SD.z","PD.z","PR.z")
+tt.mkhh.test.df <- merge(tt.cmk.test.df,t.hm0.tt.df.pred[,c("PID","SD.z","PD.z","PR.z")],by="PID",all.x=T)
+tt.mkhh.test.df$PD <- cmk.test.df$conf.PD * tt.mkhh.test.df$PD.x * 
+  ifelse(is.na(tt.mkhh.test.df$PD.y),1,tt.mkhh.test.df$PD.y * HLA.test.df$conf.PD) * 
+  ifelse(is.na(tt.mkhh.test.df$PD.z),1,tt.mkhh.test.df$PD.z * hm0.test.df$conf.PD)
+tt.mkhh.test.df$SD <- cmk.test.df$conf.SD * tt.mkhh.test.df$SD.x * 
+  ifelse(is.na(tt.mkhh.test.df$SD.y),1,tt.mkhh.test.df$SD.y * HLA.test.df$conf.SD) * 
+  ifelse(is.na(tt.mkhh.test.df$SD.z),1,tt.mkhh.test.df$SD.z * hm0.test.df$conf.SD)
+tt.mkhh.test.df$PR <- cmk.test.df$conf.PR * tt.mkhh.test.df$PR.x * 
+  ifelse(is.na(tt.mkhh.test.df$PR.y),1,tt.mkhh.test.df$PR.y * HLA.test.df$conf.PR) * 
+  ifelse(is.na(tt.mkhh.test.df$PR.z),1,tt.mkhh.test.df$PR.z * hm0.test.df$conf.PR)
+###
+tmp.sum <- tt.mkhh.test.df$PD + tt.mkhh.test.df$PR + tt.mkhh.test.df$SD
+tt.mkhh.test.df$PD <- tt.mkhh.test.df$PD/tmp.sum
+tt.mkhh.test.df$SD <- tt.mkhh.test.df$SD/tmp.sum
+tt.mkhh.test.df$PR <- tt.mkhh.test.df$PR/tmp.sum
+###
+tt.mkhh.p2 <- ggtern(data=tt.mkhh.test.df,aes(x=PR,y=PD,z=SD,color=BE3)) + 
+  theme_rgbw() + geom_density_tern(aes(color=BE3),bins=5,alpha=.5,linetype=2) +
+  geom_point(size=2,alpha=.7) + 
+  labs(title="cmk testing set")
+tt.mkhh.p2
+auc.PD <- auc(tt.mkhh.test.df$BE3=="PD",tt.mkhh.test.df$PD,plot=T)
+auc.SD <- auc(tt.mkhh.test.df$BE3=="SD",tt.mkhh.test.df$SD,plot=T)
+auc.PR <- auc(tt.mkhh.test.df$BE3=="PR",tt.mkhh.test.df$PR,plot=T)
+
+tt.mkhh.test.auc.df <- rbind(
+  data.frame(pred="PD",auc=as.numeric(auc.PD),attr(auc.PD,"roc")[2],attr(auc.PD,"roc")[3]),
+  data.frame(pred="SD",auc=as.numeric(auc.SD),attr(auc.SD,"roc")[2],attr(auc.SD,"roc")[3]),
+  data.frame(pred="PR",auc=as.numeric(auc.PR),attr(auc.PR,"roc")[2],attr(auc.PR,"roc")[3])
+)
+tt.mkhh.test.auc.df <- tt.mkhh.test.auc.df[rev(order(tt.mkhh.test.auc.df$specificities)),]
+
+tt.mkhh.p4 <- ggplot(tt.mkhh.test.auc.df,aes(x=1-specificities,y=sensitivities,color=pred)) + 
+  geom_abline(linetype=2,color="grey50") + geom_step() + 
+  geom_text(aes(x=.9,y=as.numeric(pred)/30,label=paste0("auc=",round(auc,2)))) + theme_bw()
+tt.mkhh.p4
+
+```
+
+#stat
+```{r}
+stat.auc<-rbind(
+  data.frame(set="MGS",unique(mgs.tt.df.auc[,1:2])),
+  data.frame(set="KO",unique(ko.tt.df.auc[,1:2])),
+  data.frame(set="MGS+KO",unique(cmk.tt.df.auc[,1:2])),
+  data.frame(set="TMB",unique(HLA.tt.df.auc[,1:2])),
+  data.frame(set="MGS+KO+TMB",unique(tt.cmk.test.auc.df[,1:2])),
+  data.frame(set="lymphocyte",unique(hm0.tt.df.auc[,1:2])),
+  data.frame(set="MGS+KO+lymphocyte",unique(tt.hm0.test.auc.df[,1:2])),
+  data.frame(set="MGS+KO+TMB+lymphocyte",unique(tt.mkhh.test.auc.df[,1:2]))
+)
+
+p.stat <- ggplot(stat.auc,aes(x=set,y=auc,fill=set)) + geom_bar(stat="identity") +
+  facet_grid(pred~.) + coord_flip() + scale_y_continuous(breaks=seq(0,1,0.2))
+p.stat
+if(do.write){
+  ggsave(p.stat,,width=8,height=4,
+         filename = "../../Result/RandomForest/model/NPC.multi.combined.AUC.barplot.pdf")
+}
+```

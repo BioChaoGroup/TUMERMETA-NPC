@@ -1,0 +1,1152 @@
+---
+title: "Reportscore"
+output:
+  html_notebook:
+    code_fold: hide
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(grid)
+library(pathview)
+library(ggpubr)
+library(parallel)
+library(pheatmap)
+library(RColorBrewer)
+source("./funs.RS.R")
+do.write <- F
+```
+### prep
+```{r,eval=FALSE}
+ko.prf <- read.table("../../Result/01.Profile/KO.profile")
+
+#FDNA.NS,FDNA.NPC.pick2,FDNA.NPC.pick3
+load("../../Result/TimeSeries/NPC/FDNA.NPC.picks.RData")
+
+#tsSign.MGS <- (read.csv("../../Result/TEST/timeSeries/ts36.anno.csv"))$MGS
+#MGS2IGC.map <- read.table("../../Result/00.Data/DB/MGS.map.melt.tsv",col.names = c("MGS","IGC"))
+#KO2IGC.map <- read.table("../../Result/00.Data/DB/KO.map.melt.tsv",col.names=c("KO","IGC"))
+
+#ALL.MGS2IGC.map <- merge(MGS2IGC.map,KO2IGC.map,by="IGC")
+if(file.exists("./ALL.short.map.csv")){
+  ALL.short.map <- read.csv("./ALL.short.map.csv")
+}else{
+  ALL.short.map <- ddply(ALL.MGS2IGC.map,c("MGS","KO"),summarise,count=length(IGC))
+  write.csv(ALL.short.map,"./ALL.short.map.csv")
+}
+```
+
+```{r,eval=FALSE}
+FDNA.NPC.pick2.ATBF <- FDNA.NPC.pick2%>%filter(ATB02==F)
+FDNA.NPC.pick3.ATBF <- FDNA.NPC.pick3%>%filter(ATB02==F)
+
+
+tag <- "WsSign_NPC_BE3"
+dir.create(tag)
+stA.prf <- ko.prf[,as.character(FDNA.NPC.pick2.ATBF$DNAID)]
+stA.phe <- FDNA.NPC.pick2.ATBF[,c("DNAID","BE3","Ws"),F]
+stA.phe$Ws <- droplevels(stA.phe$Ws)
+#
+tag <- "MsSign_NPC_BE3"
+dir.create(tag)
+stA.prf <- ko.prf[,as.character(FDNA.NPC.pick3.ATBF$DNAID)]
+stA.phe <- FDNA.NPC.pick3.ATBF[,c("DNAID","BE3","Ms"),F]
+
+```
+###run once
+```{r,eval=FALSE}
+#Ms
+for(g in levels(stA.phe$BE3)){
+  for(t in levels(stA.phe$Ms)){
+    name <- levels(stA.phe$BE3)
+    name <- paste0(name[which(name!=g)],collapse = "")
+    dir.create(paste0(tag,"/stA.",name,".",t))
+    stA.this.phe <- stA.phe%>%filter(BE3!=g&Ms==t)
+    stA.this.phe <- stA.this.phe[order(stA.this.phe$BE3),]
+    stA.this.prf <- stA.prf[,as.character(stA.this.phe$DNAID)]
+    write.table(stA.this.phe,paste0(tag,"/stA.",name,".",t,"/sub.phe"),quote = F, row.names = F)
+    write.table(stA.this.prf,paste0(tag,"/stA.",name,".",t,"/sub.prf"),quote = F, col.names = NA)
+  }
+}
+
+
+#Ws
+for(g in levels(stA.phe$BE3)){
+  for(t in levels(stA.phe$Ws)){
+    name <- levels(stA.phe$BE3)
+    name <- paste0(name[which(name!=g)],collapse = "")
+    #dir.create(paste0(tag,"/stA.",name,".",t))
+    stA.this.phe <- stA.phe%>%filter(BE3!=g&Ws==t)
+    stA.this.prf <- stA.prf[,as.character(stA.this.phe$DNAID)]
+    write.table(stA.this.phe,paste0(tag,"/stA.",name,".",t,"/sub.phe"),quote = F, row.names = F)
+    write.table(stA.this.prf,paste0(tag,"/stA.",name,".",t,"/sub.prf"),quote = F, col.names = NA)
+  }
+}
+
+
+rand.tag <- "M0RAND_NPC_BE3"
+set.rand.time = 100
+#load rand.pick.base.phe, rand.pick.base.test
+load(paste0("../../Result/TEST/rand.base.wilcox.",set.rand.time,".RData"))
+
+RDDIR <- paste0("../../Result/ReportScore/",rand.tag)
+if(!dir.exists(RDDIR)){dir.create(RDDIR)}
+all.base.phe <- FDNA.NS%>%filter(Ms=="M0"&ATB02==F)
+all.base.cut.phe <- all.base.phe[,c("DNAID","BE3"),F]
+
+for(g in levels(all.base.cut.phe$BE3)){
+  for(t in 1:set.rand.time){
+    name <- levels(all.base.cut.phe$BE3)
+    name <- paste0(name[which(name!=g)],collapse = "")
+    rand.DNAIDs <- as.character(rand.pick.base.phe[[t]]$DNAID)
+    iOTDIR <- paste0(RDDIR,"/rand.",name,".",sprintf("%02d",t-1))
+    if(!dir.exists(iOTDIR)){dir.create(iOTDIR)}
+    stA.this.phe <- all.base.cut.phe%>%filter(BE3!=g&DNAID%in%rand.DNAIDs)
+    stA.this.phe <- stA.this.phe[order(stA.this.phe$BE3),]
+    stA.this.prf <- ko.prf[,as.character(stA.this.phe$DNAID)]
+    write.table(stA.this.phe,paste0(iOTDIR,"/sub.phe"),quote = F, row.names = F)
+    write.table(stA.this.prf,paste0(iOTDIR,"/sub.prf"),quote = F, col.names = NA)
+  }
+}
+
+```
+
+```{bash,eval=FALSE}
+#Ws
+tag="WsSign_NPC_BE3"
+#Ms
+tag="MsSign_NPC_BE3"
+
+for i in `ls -d $tag/stA*`;do
+  perl ReporterScore.shell.generator_v2.pl -p $i/sub.prf -c $i/sub.phe -o $i/run.sh;
+done
+
+for i in `ls $tag/stA*/run.sh`;do 
+  cd `dirname $i`;
+  sh run.sh & cd ../../;
+done
+
+# rand
+randTag="M0RAND_NPC_BE3"
+#ln -s ../../Result/ReportScore/M0RAND_NPC_BE3
+
+# to generate the shells
+for i in `ls -d $randTag/rand*`;do
+  perl ReporterScore.shell.generator_v2.pl -p $i/sub.prf -c $i/sub.phe -o $i/run.sh;
+done
+# to execute
+for i in `ls $randTag/rand.PDSD.??/run.sh`;do
+  cd `dirname $i`;
+  sh run.sh & cd ../../;
+done
+wait
+for i in `ls $randTag/rand.PDPR.??/run.sh`;do
+  cd `dirname $i`;
+  sh run.sh & cd ../../;
+done
+wait
+for i in `ls $randTag/rand.SDPR.??/run.sh`;do
+  cd `dirname $i`;
+  sh run.sh & cd ../../;
+done
+```
+
+
+### load data
+* pathway score
+* module score
+```{r}
+ko.prf <- read.table("../../Result/01.Profile/KO.profile")
+#### BD
+module <- read.table("../../Result/ReportScore/Module_KO_info.list.cleanKOonly.v2") 
+pathMap<- read.table("../../Result/ReportScore/map_KO_info.list.cleanonly.v2") 
+MGSMAP <- read.table("../../Result/00.Data/DB/MGS.map.melt.tsv",sep="\t",col.names = c("MGS","IGC"))
+mgs.V2.LPS.anno <- read.csv("../../Result/01.Profile/MGS.1507.annoatation.LPS.csv")
+mgs.V2.LPS.anno$MGS <- sub(":",".",mgs.V2.LPS.anno$MGS,fixed = T)
+
+KOMAP <- read.table("../../Result/00.Data/DB/KO.map.melt.tsv",sep="\t",col.names = c("KO","IGC"))
+
+map2ko.map <- read.table("../../Result/00.Data/DB/map_K.melt.tsv",sep="\t",col.names = c("map","KO"))
+mod2ko.map <- read.table("../../Result/00.Data/DB/map_M.melt.tsv",sep="\t",col.names = c("mod","KO"))
+
+### Ws results
+INDIR <- "../../Result/ReportScore/WsSign_NPC_BE3/"
+OTDIR <- INDIR
+### Ms results
+INDIR <- "../../Result/ReportScore/MsSign_NPC_BE3/"
+OTDIR <- INDIR
+```
+
+**Load rand results**
+```{r,eval=FALSE}
+#
+rand.tag <- "M0RAND_NPC_BE3"
+set.rand.time = 10
+#load rand.pick.base.phe, rand.pick.base.test
+load(paste0("../../Result/TEST/rand.base.wilcox.",set.rand.time,".RData"))
+
+RDDIR <- paste0("../../Result/ReportScore/",rand.tag)
+
+if(file.exists(paste0(RDDIR,"/sum.rand.RS.df.RData"))){
+  #sum.rand.RS.df
+  load(paste0(RDDIR,"/sum.rand.RS.df.RData"))
+}else{
+  rand.tag <- "M0RAND_NPC_BE3"
+  set.rand.time = 100
+  names <- levels(all.base.cut.phe$BE3)
+  sum.rand.RS.df <- NULL
+  for(i in 1:set.rand.time){
+    for(g in names){
+      name <- paste0(names[which(names!=g)],collapse = "")
+      rand.DNAIDs <- as.character(rand.pick.base.phe[[i]]$DNAID)
+      iOTDIR <- paste0(RDDIR,"/rand.",name,".",sprintf("%02d",i-1))
+      ifile <- "pathway_KO.ipath59.wilcox.reporterscore.list.stat.microRelated"
+      iRS <- read.table(paste0(iOTDIR,"/02_pathway/",ifile),header=T)
+      if(g=="PD"&colnames(iRS)[7]=="coverage_SD"){
+        iRS <- iRS[,c(1:5,7:6)]
+        iRS$Reportscore <- - iRS$Reportscore
+      }
+      #Denominator and Numerator
+      colnames(iRS)[6:7] <- c("coverage_De","coverage_Nu")
+      sum.rand.RS.df <- rbind(sum.rand.RS.df,cbind(rand=i,VS=name,iRS))
+    }
+  }
+  save(sum.rand.RS.df,file=paste0(RDDIR,"/sum.rand.RS.df.RData"))
+  
+}
+```
+
+**Functions**
+```{r}
+path2mgs <- function(path.df){
+  path.map <- rownames(path.df)[which(abs(path.df$Reportscore)>1.96)]
+  path.map2gene.map <- merge(map2ko.map%>%filter(map%in%path.map),KOMAP,by="KO")
+  path.map2MGS.map <- merge(path.map2gene.map,MGSMAP,by="IGC",all.x=T)
+  path.map2MGS.anno <- merge(path.map2MGS.map,mgs.V2.LPS.anno[,c("MGS","Genus","Species")],by="MGS",all.x=T)
+  return(path.map2MGS.anno)
+}
+pathTest <- function(subdir){
+  wm6 <- read.table(paste0(INDIR,subdir,"/01_test/wilcox.m6"))
+  ra6 <- read.table(paste0(INDIR,subdir,"/01_test/relative_abun.m6"))
+  pathTest <- read.table(paste0(INDIR,subdir,"/02_pathway/pathway_KO.ipath59.wilcox.testresult.stat"))
+  pathTest$zscore <- (as.numeric(pathTest$p.value.less.<pathTest$p.value.greater.)*2-1)*qnorm(1-pathTest$p.value.twosided./2)
+  pathTest$KO <- rownames(pathTest)
+  if(colnames(pathTest)[10]=="mean.PR"&colnames(pathTest)[11]=="mean.SD"){
+    pathTest <- pathTest[,c(1:9,11:10,13:12,15:14,16:18)]
+    pathTest$zscore <- -pathTest$zscore
+  }
+  return(pathTest)
+}
+
+pickPathView <- function(path2mgs,pathTest,imap,prefix,suffix){
+  df <- path2mgs%>%filter(map==paste0("map",imap))
+  df$KO <- droplevels(df$KO)
+  df$Species <- droplevels(df$Species)
+  plot.map <- pathTest[pathTest$KO%in%unique(as.character(df$KO)),]
+  p <- pathview(gene.data = plot.map[, "zscore",F], gene.idtype = "KEGG", limit=2.6,
+                pathway.id = imap, species="ko", out.suffix = suffix)
+  file.rename(paste0("ko",imap,".",suffix,".png"), 
+              paste0(prefix,"ko",imap,".",suffix,".png"))
+  warning(paste0("plot moved to: ",prefix,"ko",imap,".",suffix,".png"))
+  return(plot.map)
+}
+
+#plot abundance
+getSelected <- function(neg="PD",pos="PR",select.ko,prf,phe,path,path.test,path.anno){
+
+  cut.prf <- prf[select.ko,]
+  select.df0 <- melt(
+    data.frame(KO=select.ko,prf[select.ko,]),
+                     id.vars = "KO",variable.name = "DNAID",value.name = "Abundance")
+  select.df <- merge(merge(merge(select.df0,phe,by="DNAID"),path.anno,by="KO",all.x=T),
+                     data.frame(map=rownames(path),path),by="map")
+  mdFun <- function(d){
+    md_neg<-median(d$Abundance[which(d$BE3==neg)])
+    md_pos<-median(d$Abundance[which(d$BE3==pos)])
+    d$md_neg <- md_neg
+    d$md_pos <- md_pos
+    return(d)
+  }
+  select.df <- ddply(select.df,c("KO"),mdFun)
+  select.df2 <- select.df%>%filter((Reportscore<0&md_neg>0)|(Reportscore>0&md_pos>0))
+  #select.ko2 <- as.character(unique(select.df2$KO))
+  select.df2$Abundance[which(select.df2$Abundance==0)] <- 1e-10
+  select.df2$Level1<-droplevels(select.df2$Level1)
+  select.df2$Level2<-droplevels(select.df2$Level2)
+  return(select.df2)
+}
+
+getEnrichInfo <- function(path,path.test,path.anno){
+  path.sign <- merge(path.anno,path[which(abs(path$Reportscore)>1.96),],by.x="map",by.y="row.names")
+  path.sign.test <- merge(path.sign,path.test[which(abs(path.test$zscore)>1.96),],by="KO")
+  path.sign.test <- path.sign.test %>% filter(Reportscore*zscore>0)
+  return(path.sign.test)
+}
+
+```
+
+### map relation
+
+###function for batch export
+```{r}
+getRSprofile <- function(neg,pos,week,phe=stA.phe,pfx="stA",plot=T){
+  tag <- paste0(neg,pos,".",week)
+  this.path <- read.table(row.names = 1,header = T,file=paste0(INDIR,pfx,".",tag,
+  "/02_pathway/pathway_KO.ipath59.wilcox.reporterscore.list.stat.microRelated"))
+  
+  if(length(which(!is.na(this.path$Reportscore)))==0){
+    return(NULL)
+  }
+  if(colnames(this.path)[5]=="coverage_PR"&colnames(this.path)[6]=="coverage_SD"){
+    this.path <- this.path[c(1:4,6:5)]
+    this.path$Reportscore <- -this.path$Reportscore
+  }
+  this.path.gt <- pathFun(this.path, tag,"NPC")
+  grid.newpage()
+  pdf(paste0(OTDIR,pfx,".",tag,"/",pfx,".",tag,".pathway.plot.pdf"),width = 14,height = 14)
+  grid.draw(this.path.gt)
+  dev.off()
+
+  this.path.anno <- path2mgs(this.path)
+  this.path.test <- pathTest(paste0(pfx,".",tag))
+  
+  this.path <- this.path[order(this.path$Reportscore),]
+  if(plot){
+    for (i in rep(c(5,nrow(this.path)),each=5) - 4:0){
+      map=sub("map","",rownames(this.path)[i])
+      if(abs(this.path$Reportscore)>1.96){
+        tmp <-pickPathView(this.path.anno,this.path.test,map,paste0(OTDIR,pfx,".",tag,"/"),"path")
+      }
+    }    
+  }
+  
+  this.prf <- read.table(paste0(OTDIR,pfx,".",tag,"/sub.prf"))
+  this.phe <- read.table(paste0(OTDIR,pfx,".",tag,"/sub.phe"),header=T)
+  this.anno2 <- unique(this.path.anno[,3:4])
+  p2 <- ggplot(this.path.test,aes(p.value.twosided.)) + geom_histogram()
+  
+  this.sign <- getEnrichInfo(this.path,this.path.test,this.anno2)
+  this.sign.ko <- as.character(unique(this.sign$KO))
+  
+  this.df2 <- getSelected(neg,pos,this.sign.ko,this.prf,this.phe,
+                               this.path,this.path.test,this.anno2)
+  this.df2$BE3 <- factor(this.df2$BE3,levels=c("PD","SD","PR"))
+  return(list(
+    tag=tag,path=this.path,test=this.path.test,anno=this.anno2,p=p2,
+    sign.df=this.df2))
+}
+```
+
+#Summary of all time points
+```{r resRs for all&t36,warning=FALSE}
+getFun <- function(x,...){
+      library(reshape2);library(ape);library(ggplot2);library(plyr);
+      library(dplyr);library(grid);library(pathview);
+      getRSprofile(grp[1],grp[2],x)
+}
+
+### Ms results
+tag <- "MsSign_NPC_BE3"
+INDIR <- "../../Result/ReportScore/MsSign_NPC_BE3/"
+OTDIR <- INDIR
+MsDIR <- "../../Result/ReportScore/MsSign_NPC_BE3/"
+#dir.create(tag)
+stA.prf <- ko.prf[,as.character(FDNA.NPC.pick3.ATBF$DNAID)]
+stA.phe <- FDNA.NPC.pick3.ATBF[,c("DNAID","BE3","Ms"),F]
+
+#Ms
+if(file.exists(paste0(MsDIR,"Ms.resRS.RData"))){
+  load(paste0(MsDIR,"Ms.resRS.RData"))
+}else{
+  Ms.res.RS <- list()
+  for(i in 1:3){
+    grp <- c("PD","SD","PR")[-i]
+    tag <- paste0(grp,collapse = "")
+    cl <- makeCluster(length(levels(stA.phe$Ms)))
+    clusterExport(cl,c("INDIR","OTDIR","grp","getRSprofile","pathFun","path2mgs",
+                       "pathTest","pickPathView","getEnrichInfo","getSelected",
+                       "map2ko.map","KOMAP","MGSMAP","mgs.V2.LPS.anno"))
+    res.tmp <- parSapply(cl, levels(stA.phe$Ms), getFun,simplify = F)
+    Ms.res.RS[[tag]] <- res.tmp
+    stopCluster(cl)
+  }
+  save(Ms.res.RS,file=paste0(OTDIR,"Ms.resRS.RData"))
+}
+
+#Ws
+### Ws results
+tag <- "WsSign_NPC_BE3"
+INDIR <- "../../Result/ReportScore/WsSign_NPC_BE3/"
+OTDIR <- INDIR
+if(file.exists(paste0(OTDIR,"Ws.resRS.RData"))){
+  load(paste0(OTDIR,"Ws.resRS.RData"))
+}else{
+  Ws.res.RS <- list()
+  for(i in 1:3){
+    grp <- c("PD","SD","PR")[-i]
+    tag <- paste0(grp,collapse = "")
+    cl <- makeCluster(length(levels(stA.phe$Ws)))
+    #cl <- makeCluster(2)
+    clusterExport(cl,c("INDIR","OTDIR","grp","getRSprofile","pathFun","path2mgs",
+                       "pathTest","pickPathView","getEnrichInfo","getSelected",
+                       "map2ko.map","KOMAP","MGSMAP","mgs.V2.LPS.anno"))
+    res.tmp <- parSapply(cl, levels(stA.phe$Ws), function(x,...) {
+      library(reshape2);library(ape);library(ggplot2);library(plyr);
+      library(dplyr);library(grid);library(pathview);
+      getRSprofile(grp[1],grp[2],x)},simplify = F)
+    Ws.res.RS[[tag]] <- res.tmp
+    stopCluster(cl)
+  }
+  save(Ws.res.RS,file=paste0(OTDIR,"Ws.resRS.RData"))
+}
+
+#PUB
+### Ms results
+tag <- "PUB_MsSign_BE3"
+INDIR <- "../../Result/ReportScore/pubAll_BE3/"
+OTDIR <- INDIR
+dir.create(OTDIR)
+#load cc.phe
+load("../../Result/Phenotype/pub.cc.phe.RData")
+if(file.exists(paste0(OTDIR,"pub.Ms.resRS.RData"))){
+  load(paste0(OTDIR,"pub.Ms.resRS.RData"))
+}else{
+  pub.res.RS <- list()
+  for(i in 1:3){
+    grp <- c("PD","SD","PR")[-i]
+    tag <- paste0(grp,collapse = "")
+    cl <- makeCluster(3)
+    #cl <- makeCluster(2)
+    clusterExport(cl,c("INDIR","OTDIR","grp","cc.phe","getRSprofile","pathFun","path2mgs",
+                       "pathTest","pickPathView","getEnrichInfo","getSelected",
+                       "map2ko.map","KOMAP","MGSMAP","mgs.V2.LPS.anno"))
+    res.tmp <- parSapply(cl, as.character(c(0,1,2)), function(x,...) {
+      library(reshape2);library(ape);library(ggplot2);library(plyr);
+      library(dplyr);library(grid);library(pathview);
+      getRSprofile(grp[1],grp[2],x,cc.phe,"ALL",T)},simplify = F)
+    pub.res.RS[[tag]] <- res.tmp
+    stopCluster(cl)
+  }
+  save(pub.res.RS,file=paste0(OTDIR,"pub.Ms.resRS.RData"))
+}
+
+```
+
+#Pick specific pathview
+```{r,eval=FALSE}
+Ms.PDPR.W0.anno <- path2mgs(Ms.res.RS$PDPR$M0$path)
+Ms.PDPR.W0.02040 <- pickPathView(Ms.PDPR.W0.anno,Ms.res.RS$PDPR$M0$test,
+                                "02040","./MsSign_NPC_BE3/stA.PDPR.M0/","path")
+
+
+
+stA.PDPR.W0.anno <- path2mgs(resRS$PDPR$W0$path)
+stA.PDPR.W0.00240 <- pickPathView(stA.PDPR.W0.anno,resRS$PDPR$W0$test,
+                                "00240","./WsSign_NPC_BE3/stA.PDPR.W0/","path")
+
+stA.PDPR.W1.anno <- path2mgs(resRS$PDPR$W1$path)
+stA.PDPR.W1.03070 <- pickPathView(stA.PDPR.W1.anno,resRS$PDPR$W1$test,
+                                "03070","./WsSign_NPC_BE3/stA.PDPR.W1/","path")
+stA.PDPR.W1.00540 <- pickPathView(stA.PDPR.W1.anno,resRS$PDPR$W1$test,
+                                "00540","./WsSign_NPC_BE3/stA.PDPR.W1/","path")
+stA.PDPR.W1.03010 <- pickPathView(stA.PDPR.W1.anno,resRS$PDPR$W1$test,
+                                "03010","./WsSign_NPC_BE3/stA.PDPR.W1/","path")
+
+stA.PDPR.W2.anno <- path2mgs(resRS$PDPR$W2$path)
+stA.PDPR.W2.03070 <- pickPathView(stA.PDPR.W2.anno,resRS$PDPR$W2$test,
+                                "03070","./WsSign_NPC_BE3/stA.PDPR.W2/","path")
+stA.PDPR.W2.00540 <- pickPathView(stA.PDPR.W2.anno,resRS$PDPR$W2$test,
+                                "00540","./WsSign_NPC_BE3/stA.PDPR.W2/","path")
+
+stA.PDPR.W4.anno <- path2mgs(resRS$PDPR$W4$path)
+stA.PDPR.W4.00540 <- pickPathView(stA.PDPR.W4.anno,resRS$PDPR$W4$test,
+                                "00540","./WsSign_NPC_BE3/stA.PDPR.W4/","path")
+
+stA.PDPR.W6.anno <- path2mgs(resRS$PDPR$W6$path)
+stA.PDPR.W6.00540 <- pickPathView(stA.PDPR.W6.anno,resRS$PDPR$W6$test,
+                                "00540","./WsSign_NPC_BE3/stA.PDPR.W6/","path")
+
+
+stA.PDPR.t36.anno <- path2mgs(resRS.t36$PDPR$t36$path)
+stA.PDPR.t36.03070 <- pickPathView(stA.PDPR.t36.anno,resRS.t36$PDPR$t36$test,
+                                "03070","./WsSign_NPC_BE3/stA.PDPR.t36/","path")
+```
+
+
+#export reportscores
+```{r}
+Ms.RS.dcast.df <- Ms.res.RS[["PDPR"]]$M0$path[,1:3]
+Ms.RS.dcast.df$map <- rownames(Ms.RS.dcast.df)
+for(v in c("PDPR","PDSD","SDPR")){
+  for(w in names(Ms.res.RS[[v]])){
+    tmp <- Ms.res.RS[[v]][[w]]$path[,4,F]
+    colnames(tmp) <- paste0(v,w)
+    tmp$map <- rownames(tmp)
+    Ms.RS.dcast.df <- merge(Ms.RS.dcast.df,tmp,by='map')
+  }
+}
+if(do.write){
+  write.csv(Ms.RS.dcast.df,file = "../../Result/ReportScore/MsSign_NPC_BE3/Ms.RS.dcast.df.csv")
+}
+```
+
+
+###select significant KOs
+**comapre reportscore before/after treatment**
+```{r,fig.widt=8}
+#Ms
+Ms.comb.df <- NULL
+for(v in c("PDPR","PDSD","SDPR")){
+  for(w in names(Ms.res.RS[[v]])[-1]){
+    Ms.comb.df <- rbind(Ms.comb.df,cbind(VS=v,Ms=w,
+      merge(Ms.res.RS[[v]]$M0$path[,1:4],Ms.res.RS[[v]][[w]]$path[,4,F],by='row.names')))
+  }
+}
+
+Ms.cor <- ddply(Ms.comb.df,c("VS","Ms"),summarise,cor=cor(Reportscore.x,Reportscore.y,method="spearman"))
+dcast(Ms.cor,Ms~VS,value.var = "cor")
+Ms.cor$pos <- ifelse(Ms.cor$VS=="PDPR",-5,ifelse(Ms.cor$VS=="PDSD",-7,-9))
+Ms.cor$text <- sprintf("r=%.2f",Ms.cor$cor)
+pcMs <- ggplot(Ms.comb.df,aes(x=Reportscore.x,y=Reportscore.y,color=VS)) + 
+  geom_vline(xintercept = c(-2.59,-1.96,1.96,2.59),linetype=2,color="grey50",alpha=.7) +
+  geom_hline(yintercept = c(-2.59,-1.96,1.96,2.59),linetype=2,color="grey50",alpha=.7) +
+  geom_abline(slope=1,intercept = 0,linetype=2,color="grey50",alpha=.7) +
+  geom_point(alpha=.5,size=1) + stat_ellipse() + xlim(-10,10) +ylim(-10,10) + 
+  geom_text(data=Ms.cor,x=7,aes(y=pos,label=text)) + theme_bw() +
+  xlab("Reportscore @ W0") + ylab("Reportscore after treatment") + facet_grid(Ms~.)+
+  scale_color_brewer(palette = "Set2") #+ theme(legend.position = c(.8,.2))
+pcMs
+
+#Ws
+Ws.comb.df <- NULL
+for(v in c("PDPR","PDSD","SDPR")){
+  for(w in paste0("W",c(1,2,4,6,8,10,12,16))){
+    Ws.comb.df <- rbind(Ws.comb.df,cbind(VS=v,Ws=w,
+      merge(Ws.res.RS[[v]]$W0$path[,1:4],Ws.res.RS[[v]][[w]]$path[,4,F],by='row.names')))
+  }
+}
+
+Ws.cor <- ddply(Ws.comb.df,c("VS","Ws"),summarise,cor=cor(Reportscore.x,Reportscore.y,method="spearman"))
+dcast(Ws.cor,Ws~VS,value.var = "cor")
+Ws.cor$pos <- ifelse(Ws.cor$VS=="PDPR",-5,ifelse(Ws.cor$VS=="PDSD",-7,-9))
+Ws.cor$text <- sprintf("r=%.2f",Ws.cor$cor)
+pcWs <- ggplot(Ws.comb.df,aes(x=Reportscore.x,y=Reportscore.y,color=VS)) + 
+  geom_vline(xintercept = c(-2.59,-1.96,1.96,2.59),linetype=2,color="grey50",alpha=.7) +
+  geom_hline(yintercept = c(-2.59,-1.96,1.96,2.59),linetype=2,color="grey50",alpha=.7) +
+  geom_abline(slope=1,intercept = 0,linetype=2,color="grey50",alpha=.7) +
+  geom_point(alpha=.5) + stat_ellipse() + xlim(-10,10) +ylim(-10,10) + 
+  geom_text(data=Ws.cor,x=7,aes(y=pos,label=text)) + theme_bw() +
+  xlab("Reportscore @ W0") + ylab("Reportscore after treatment") + facet_wrap(~Ws,ncol=4)+
+  scale_color_brewer(palette = "Set2") #+ theme(legend.position = c(.8,.2))
+pcWs
+
+if(do.write){
+  ggsave(pc01,file=paste0(OTDIR,"reportscore.xy.W01.pdf"),width=4,height=4)
+  ggsave(pc0t,file=paste0(OTDIR,"reportscore.xy.W0t.pdf"),width=4,height=4)
+  ggsave(pcMs,file="../../Result/ReportScore/MsSign_NPC_BE3/reportscore.xy.pcMs04.pdf",width=4,height=11)
+  ggsave(pcWs,file="../../Result/ReportScore/WsSign_NPC_BE3/reportscore.xy.pcWs16.pdf",width=6,height=6)
+
+}
+```
+#extra: compared with pub data
+```{r}
+#pub
+pub.comb.df <- NULL
+for(v in c("PDPR","PDSD","SDPR")){
+  for(w in c("1","2")){
+    pub.comb.df <- rbind(pub.comb.df,cbind(VS=v,Ms=w,
+      merge(pub.res.RS[[v]][["0"]]$path[,1:4],pub.res.RS[[v]][[w]]$path[,4,F],by='row.names')))
+  }
+}
+
+pub.cor <- ddply(pub.comb.df,c("VS","Ms"),summarise,cor=cor(Reportscore.x,Reportscore.y,method="spearman"))
+dcast(pub.cor,Ms~VS,value.var = "cor")
+pub.cor$pos <- ifelse(pub.cor$VS=="PDPR",-5,ifelse(pub.cor$VS=="PDSD",-7,-9))
+pub.cor$text <- sprintf("r=%.2f",pub.cor$cor)
+pcMs <- ggplot(pub.comb.df,aes(x=Reportscore.x,y=Reportscore.y,color=VS)) + 
+  geom_vline(xintercept = c(-2.59,-1.96,1.96,2.59),linetype=2,color="grey50",alpha=.7) +
+  geom_hline(yintercept = c(-2.59,-1.96,1.96,2.59),linetype=2,color="grey50",alpha=.7) +
+  geom_abline(slope=1,intercept = 0,linetype=2,color="grey50",alpha=.7) +
+  geom_point(alpha=.5,size=1) + stat_ellipse() + xlim(-10,10) +ylim(-10,10) + 
+  geom_text(data=pub.cor,x=7,aes(y=pos,label=text)) + theme_bw() +
+  xlab("Reportscore @ W0") + ylab("Reportscore after treatment") + facet_grid(Ms~.)+
+  scale_color_brewer(palette = "Set2") #+ theme(legend.position = c(.8,.2))
+pcMs
+
+
+# 
+pub.comb.df$Ms <- paste0("M",pub.comb.df$Ms)
+
+t.com.comb.df <- merge(Ms.comb.df,pub.comb.df[,c(1:3,7:8)],by=c("VS","Ms","Row.names"))
+com.0.comb.df <- (t.com.comb.df%>%filter(Ms=="M1"))[c(1:7,9)]
+colnames(com.0.comb.df)[7:8] <- c("Reportscore.CH","Reportscore.CA")
+com.0.comb.df$Ms<-"M0"
+com.1.comb.df <- t.com.comb.df[c(1:6,8,10)]
+colnames(com.1.comb.df)[7:8] <- c("Reportscore.CH","Reportscore.CA")
+com.comb.df <- rbind(com.0.comb.df,com.1.comb.df)
+
+com.cor <- ddply(com.comb.df,c("VS","Ms"),summarise,cor=cor(Reportscore.CH,Reportscore.CA,method="spearman"))
+dcast(com.cor,Ms~VS,value.var = "cor")
+com.cor$pos <- ifelse(com.cor$VS=="PDPR",-5,ifelse(com.cor$VS=="PDSD",-7,-9))
+com.cor$text <- sprintf("r=%.2f",com.cor$cor)
+
+pcMs2 <- ggplot(com.comb.df%>%filter(Ms=="M0"),aes(x=Reportscore.CH,y=Reportscore.CA,color=VS)) + 
+  geom_vline(xintercept = c(-1.96,1.96),linetype=2,color="grey50",alpha=.7) +
+  geom_hline(yintercept = c(-1.96,1.96),linetype=2,color="grey50",alpha=.7) +
+  geom_abline(slope=1,intercept = 0,linetype=2,color="grey50",alpha=.7) +
+  geom_point(alpha=.5,size=1.5) + stat_ellipse() + 
+  geom_text(data=com.cor%>%filter(Ms=="M0"),x=7,aes(y=pos,label=text)) + theme_bw() + #facet_grid(Ms~.)+
+  xlab("Reportscore from Chinese cohort") + ylab("Reportscore from French cohort") + 
+  scale_x_continuous(breaks=seq(-13,13,2),limits=c(-13,13)) +
+  scale_y_continuous(breaks=seq(-10,10,2),limits=c(-10,10)) +
+  scale_color_brewer(palette = "Set2")
+pcMs2
+if(do.write){
+  write.csv(com.comb.df,"../../Result/ReportScore/pubAll_BE3/com.comb.df.csv")
+  ggsave(pcMs2,width=8,height=6,
+         filename = "../../Result/ReportScore/pubAll_BE3/com.comb.base.cor.plot.pdf")
+}
+```
+
+**pick significant ko commonly appeared in randomly picked baselien samples**
+```{r}
+stat.rand.RS.df <- ddply(sum.rand.RS.df,colnames(sum.rand.RS.df)[2:6],summarise,
+                         sign.freq=length(which(abs(Reportscore)>1.96)),
+                         RS.sd=sd(Reportscore),
+                         Reportscore=mean(Reportscore),
+                         coverage_De=mean(coverage_De),
+                         coverage_Nu=mean(coverage_Nu)
+)
+pr100 <- ggplot(stat.rand.RS.df,aes(x=sign.freq,y=Reportscore,size=RS.sd,color=VS)) + 
+  geom_hline(yintercept = c(-1.96,1.96),linetype=2,color="grey50",alpha=.5) +
+  geom_point(alpha=.3) + scale_color_brewer(palette="Set2") + theme_bw() +
+  labs(x="frequency of singinicance",size="sd") +
+  scale_x_continuous(breaks=seq(0,100,20))
+pr100
+rand100.sign.RS.path.name <- as.character(unique((stat.rand.RS.df%>%filter(sign.freq==100))$Pathway_id))
+if(do.write){
+  ggsave(pr100,width = 4,height=6,
+         filename = "../../Result/ReportScore/MsSign_NPC_BE3/rand.100.pval.freq.dot.pdf")
+}
+```
+
+**pick significant ko both appeared before/after treatment**
+```{r}
+Ms.sign.comb.df <- Ms.comb.df%>%filter(
+  abs(Reportscore.x)>1.96&abs(Reportscore.y)>1.96&Reportscore.x*Reportscore.y>0)
+ggplot(Ms.sign.comb.df,aes(x=Reportscore.x,y=Reportscore.y,color=VS)) + 
+  geom_vline(xintercept = c(-2.59,-1.96,1.96,2.59),linetype=2) +
+  geom_hline(yintercept = c(-2.59,-1.96,1.96,2.59),linetype=2) +
+  geom_point()+facet_wrap(~Ms,ncol=2)
+
+select.map <- unique(as.character(Ms.sign.comb.df$Row.names))
+
+#Ms
+Ms.sign.path.df <- NULL
+for(i in 1:3){
+  grp <- c("PD","SD","PR")[-i]
+  tag <- paste0(grp,collapse = "")
+  for(j in names(Ms.res.RS$SDPR)){
+    ipath <- Ms.res.RS[[tag]][[j]]$path
+    ipath <- ipath[which(rownames(ipath)%in%select.map),]
+    if(is.null(ipath))
+      next
+    colnames(ipath)[ncol(ipath)-1:0] <- c("coverage_Nr","coverage_Dr")
+    Ms.sign.path.df <- rbind(Ms.sign.path.df,
+        data.frame(tag=tag,Ms=j,map=rownames(ipath),ipath))
+  }
+}
+
+#Ws
+Ws.sign.path.df <- NULL
+for(i in 1:3){
+  grp <- c("PD","SD","PR")[-i]
+  tag <- paste0(grp,collapse = "")
+  for(j in paste0("W",c(0,1,seq(2,12,2),16))){
+    ipath <- Ws.res.RS[[tag]][[j]]$path
+    ipath <- ipath[which(rownames(ipath)%in%select.map),]
+    if(is.null(ipath))
+      next
+    colnames(ipath)[ncol(ipath)-1:0] <- c("coverage_Nr","coverage_Dr")
+    Ws.sign.path.df <- rbind(Ws.sign.path.df,
+        data.frame(tag=tag,Ws=j,map=rownames(ipath),ipath))
+  }
+}
+
+#M0RAND
+MR.sign.path.df <- NULL
+for(i in 1:3){
+  grp <- c("PD","SD","PR")[-i]
+  tag <- paste0(grp,collapse = "")
+  for(j in names(Ms.res.RS$SDPR)){
+    ipath <- Ms.res.RS[[tag]][[j]]$path
+    ipath <- ipath[which(rownames(ipath)%in%rand100.sign.RS.path.name),]
+    if(is.null(ipath))
+      next
+    colnames(ipath)[ncol(ipath)-1:0] <- c("coverage_Nr","coverage_Dr")
+    MR.sign.path.df <- rbind(MR.sign.path.df,
+        data.frame(tag=tag,Ms=j,map=rownames(ipath),ipath))
+  }
+}
+
+#PUB
+pub.sign.path.df <- NULL
+for(i in 1:3){
+  grp <- c("PD","SD","PR")[-i]
+  tag <- paste0(grp,collapse = "")
+  for(j in 1:2){
+    ipath <- pub.res.RS[[tag]][[j]]$path
+    ipath <- ipath[which(rownames(ipath)%in%select.map),]
+    if(is.null(ipath))
+      next
+    colnames(ipath)[ncol(ipath)-1:0] <- c("coverage_Nr","coverage_Dr")
+    pub.sign.path.df <- rbind(pub.sign.path.df,
+        data.frame(tag=tag,Ms=j,map=rownames(ipath),ipath))
+  }
+}
+```
+
+```{r}
+map.anno <- unique(Ms.sign.path.df[,c(3:6)])
+map.anno <- map.anno[order(map.anno$Level1),]
+
+sign.path.mat <- dcast(Ms.sign.path.df[,c(1:3,7)],map~tag+Ms,value.var = "Reportscore",fill = 0)
+rownames(sign.path.mat) <- sign.path.mat$map
+sign.path.mat <- sign.path.mat[as.character(map.anno$map),-1]
+
+sam.phe <- as.data.frame(matrix(unlist(strsplit(colnames(sign.path.mat),"_")),ncol=2,byrow=T))
+rownames(sam.phe) <- colnames(sign.path.mat)
+colnames(sam.phe) <- c("group","timeStage")
+
+pMs <- pheatmap(sign.path.mat,cluster_cols = F,cluster_rows=F,
+         colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(8),
+         breaks=c(-10,-5,-2.59,-1.96,0,1.96,2.59,5,10),border_color="white",
+         annotation_row = map.anno[,2,F],gaps_row = cumsum(table(map.anno$Level1)),
+         #annotation_col = sam.phe[,2,F],
+         gaps_col=c(6,12),
+         filename = paste0(OTDIR,"reportscore.sum.all.heatmap.pdf"),width=8.2,height=12)
+pMs
+
+
+if(do.write){
+  write.csv(map.anno,paste0(OTDIR,"reportscore.sum.all.map.anno.csv"))
+  sign.path.mat.df <- sign.path.mat
+  sign.path.mat.df$map <- rownames(sign.path.mat)
+  Ms.RS.sign.dcast.df <- merge(map.anno,sign.path.mat.df,by="map")
+  write.csv(Ms.RS.sign.dcast.df,file = "../../Result/ReportScore/MsSign_NPC_BE3/Ms.RS.sign.dcast.df.csv")
+}
+```
+
+**heatmap of M0RAND**
+```{r}
+MR.map.anno <- unique(MR.sign.path.df[,c(3:6)])
+MR.map.anno <- MR.map.anno[order(MR.map.anno$Level1),]
+
+MR.sign.path.mat <- dcast(MR.sign.path.df[,c(1:3,7)],map~tag+Ms,value.var = "Reportscore",fill = 0)
+rownames(MR.sign.path.mat) <- MR.sign.path.mat$map
+MR.sign.path.mat <- MR.sign.path.mat[as.character(MR.sign.path.mat$map),-1]
+
+MR.sam.phe <- as.data.frame(matrix(unlist(strsplit(colnames(MR.sign.path.mat),"_")),ncol=2,byrow=T))
+rownames(MR.sam.phe) <- colnames(MR.sign.path.mat)
+colnames(MR.sam.phe) <- c("group","timeStage")
+
+pMR <- pheatmap(MR.sign.path.mat[as.character(MR.map.anno$map),],
+         cluster_cols = F,cluster_rows=F,
+         colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(8),
+         breaks=c(-10,-5,-2.59,-1.96,0,1.96,2.59,5,10),border_color="white",
+         annotation_row = MR.map.anno[,2,F],gaps_row = cumsum(table(MR.map.anno$Level1)),
+         #annotation_col = sam.phe[,2,F],
+         gaps_col=c(6,12))#,
+         #filename = paste0(RDDIR,"reportscore.sum.all.heatmap.pdf"),width=12,height=12)
+pMR
+if(do.write){
+  write.csv(MR.map.anno,paste0(RDDIR,"/reportscore.sum.all.map.anno.csv"))
+}
+```
+
+### significant map shannon
+```{r}
+sign.map.shannon <- function(d){
+  dat <- ko.prf[as.character(d$KO),]
+  res <- apply(dat,2,function(x) {x<-x[which(x>0)];sum(-x*log(x))/sum(x) + log(sum(x))})
+  return(res)
+}
+Ms.sign.map.name <- unique(as.character(Ms.sign.comb.df$Row.names))
+shan.map <- ddply(map2ko.map%>%filter(map%in%Ms.sign.map.name),"map",sign.map.shannon)
+rownames(shan.map) <- shan.map$map
+shan.map  <- as.matrix(shan.map[,-1])
+shan.map <- scale(shan.map)
+DNA.phe <- FDNA.NPC.pick2.ATBF
+pheatmap(shan.map[rownames(sign.path.mat),DNA.phe$DNAID],
+         cluster_cols = F,cluster_rows=F,
+         annotation_row = map.anno[,2,F],gaps_row = cumsum(table(map.anno$Level1)),
+         annotation_col = tsALL.phe[,c("Ws","BE3"),F])
+```
+
+#sign at W0
+```{r}
+sign.map2ko <- map2ko.map%>%filter(map%in%Ms.sign.map.name)
+sign.map2ko.PDPR <- Ms.res.RS$PDPR$M0$test%>%filter(
+  KO%in%as.character(sign.map2ko$KO)&p.value.twosided.<0.05)
+sign.map2ko.SDPR <- Ms.res.RS$SDPR$M0$test%>%filter(
+  KO%in%as.character(sign.map2ko$KO)&p.value.twosided.<0.05)
+sign.map2ko.PDSD <- Ms.res.RS$PDSD$M0$test%>%filter(
+  KO%in%as.character(sign.map2ko$KO)&p.value.twosided.<0.05)
+
+select.markers <- rbind(
+  cbind(VS="PDPR",sign.map2ko.PDPR[,c(1,17:18)]),
+  cbind(VS="SDPR",sign.map2ko.SDPR[,c(1,17:18)]),
+  cbind(VS="PDSD",sign.map2ko.PDSD[,c(1,17:18)]))
+select.markers <- merge(sign.map2ko,select.markers,by="KO")
+save(select.markers,file=paste0(OTDIR,"select.markers.RData"))
+```
+
+#sign in RAND
+```{r}
+sign.map2ko <- map2ko.map%>%filter(map%in%as.character(MR.map.anno$map))
+sign.map2ko.PDPR <- Ms.res.RS$PDPR$M0$test%>%filter(
+  KO%in%as.character(sign.map2ko$KO)&abs(zscore)>2.59)
+sign.map2ko.SDPR <- Ms.res.RS$SDPR$M0$test%>%filter(
+  KO%in%as.character(sign.map2ko$KO)&abs(zscore)>2.59)
+sign.map2ko.PDSD <- Ms.res.RS$PDSD$M0$test%>%filter(
+  KO%in%as.character(sign.map2ko$KO)&abs(zscore)>2.59)
+
+select.markers <- rbind(
+  cbind(VS="PDPR",sign.map2ko.PDPR[,c(1,17:18)]),
+  cbind(VS="SDPR",sign.map2ko.SDPR[,c(1,17:18)]),
+  cbind(VS="PDSD",sign.map2ko.PDSD[,c(1,17:18)]))
+select.markers <- merge(sign.map2ko,select.markers,by="KO")
+tmp <- ddply(select.markers,"KO",summarise,occ=length(which(table(VS)>0)))
+save(select.markers,file=paste0(RDDIR,"/select.markers.RData"))
+```
+
+
+**prepare for public data**
+
+```{r pub}
+tag <- "pubAll_BE3"
+dir.create(tag)
+#public comparison
+pub.ko.prf <- read.table("../../Result/01.Profile/Pub_Caucasian/Caucasian.ko.abun.profile")
+pub.phe <- read.csv("../../Result/Phenotype/phenotype.caucasian.csv",row.names = 1)
+pub.phe <- pub.phe%>%filter(BestEvaluation!="DD")
+pub.phe$BE3 <- factor(pub.phe$BestEvaluation,levels=c("PD","SD","PR"))
+pub.phe$MTime <- as.factor(as.numeric(pub.phe$CTgrp) -1 )
+cut.phe <- pub.phe[which(pub.phe$Tumor_Type=="NPC"),c("DNAID","BE3","MTime"),F]
+
+#
+
+for(g in levels(cut.phe$BE3)){
+  for(t in levels(cut.phe$MTime)){
+    name <- levels(cut.phe$BE3)
+    name <- paste0(name[which(name!=g)],collapse = "")
+    this.phe <- cut.phe%>%filter(BE3!=g&MTime==t)
+    this.prf <- pub.ko.prf[,this.phe$DNAID]
+    dir.create(paste0(tag,"/ALL.",name,t))
+    write.table(this.phe,paste0(tag,"/ALL.",name,t,"/sub.phe"),quote = F, row.names = F)
+    write.table(this.prf,paste0(tag,"/ALL.",name,t,"/sub.prf"),quote = F, col.names = NA)
+  }
+}
+
+```
+
+```{bash,eval=FALSE}
+for i in `ls -d pubAll_BE3/ALL.*`;do
+  perl ReporterScore.shell.generator_v2.pl -p $i/sub.prf -c $i/sub.phe -o $i/run.sh;
+done
+
+for i in `ls  pubAll_BE3/ALL.*/run.sh`;do 
+  cd `dirname $i`;
+  sh run.sh & cd ../../;
+done
+
+```
+
+* pathway score
+* module score
+```{r, warning=FALSE}
+INDIR <- "../../Result/ReportScore/pubAll_BE3/"
+OTDIR <- INDIR
+
+### results
+
+#### WT=0 & all KOs
+ALL.PDPR.W0.path <- read.table(row.names = 1,header = T,file=paste0(INDIR,
+  "ALL.PDPR.W0/02_pathway/","pathway_KO.ipath59.wilcox.reporterscore.list.stat.microRelated"))
+ALL.PDPR.W0.modu <- read.table(row.names = 1, header = T,file=paste0(INDIR,
+  "ALL.PDPR.W0/03_module/","module_KO.ipath59.wilcox.reporterscore.list.stat.microRelated"))
+ALL.SDPR.W0.path <- read.table(row.names = 1,header = T,file=paste0(INDIR,
+  "ALL.SDPR.W0/02_pathway/","pathway_KO.ipath59.wilcox.reporterscore.list.stat.microRelated"))
+ALL.SDPR.W0.modu <- read.table(row.names = 1, header = T,file=paste0(INDIR,
+  "ALL.SDPR.W0/03_module/","module_KO.ipath59.wilcox.reporterscore.list.stat.microRelated"))
+ALL.PDSD.W0.path <- read.table(row.names = 1,header = T,file=paste0(INDIR,
+  "ALL.PDSD.W0/02_pathway/","pathway_KO.ipath59.wilcox.reporterscore.list.stat.microRelated"))
+ALL.PDSD.W0.modu <- read.table(row.names = 1, header = T,file=paste0(INDIR,
+  "ALL.PDSD.W0/03_module/","module_KO.ipath59.wilcox.reporterscore.list.stat.microRelated"))
+
+if(file.exists("./resRS.pub.RData")){
+  load("./resRS.pub.RData")
+}else{
+  resRS.pub <- list()
+  for(i in 1:3){
+    grp <- c("PD","SD","PR")[-i]
+    tag <- paste0(grp,collapse = "")
+    for(j in as.character(c(0,1,2))){
+      res.tmp <- getRSprofile(grp[1],grp[2],j,phe=pub.phe,plot=F,pfx = "ALL")
+      resRS.pub[[tag]][[j]] <- res.tmp
+    }
+  }
+  save(resRS.pub,file="./resRS.pub.RData")
+}
+```
+
+```{r}
+pub.comb.df <- rbind(
+  cbind(VS="PDPR",merge(Ms.res.RS$PDPR$M0$path[,4,F],pub.res.RS$PDPR$`0`$path[,1:4],by='row.names')),
+  cbind(VS="PDSD",merge(Ms.res.RS$PDSD$M0$path[,4,F],pub.res.RS$PDSD$`0`$path[,1:4],by='row.names')),
+  cbind(VS="SDPR",merge(Ms.res.RS$SDPR$M0$path[,4,F],pub.res.RS$SDPR$`0`$path[,1:4],by='row.names')))
+
+ggplot(pub.comb.df,aes(x=Reportscore.x,y=Reportscore.y,color=VS)) + 
+  geom_vline(xintercept = c(-2.59,-1.96,1.96,2.59),linetype=2) +
+  geom_hline(yintercept = c(-2.59,-1.96,1.96,2.59),linetype=2) +
+  geom_point() + stat_ellipse()
+
+
+com.cor <- ddply(pub.comb.df,c("VS"),summarise,cor=cor(Reportscore.x,Reportscore.y,method="spearman"))
+com.cor$pos <- ifelse(com.cor$VS=="PDPR",-5,ifelse(com.cor$VS=="PDSD",-7,-9))
+com.cor$text <- sprintf("r=%.2f",com.cor$cor)
+
+pcMs2 <- ggplot(pub.comb.df,aes(x=Reportscore.x,y=Reportscore.y,color=VS)) + 
+  geom_vline(xintercept = c(-2.59,-1.96,1.96,2.59),linetype=2,color="grey50",alpha=.7) +
+  geom_hline(yintercept = c(-2.59,-1.96,1.96,2.59),linetype=2,color="grey50",alpha=.7) +
+  geom_abline(slope=1,intercept = 0,linetype=2,color="grey50",alpha=.7) +
+  geom_point(alpha=.5,size=1) + stat_ellipse() + xlim(-10,10) +ylim(-10,10) + 
+  geom_text(data=com.cor,x=7,aes(y=pos,label=text)) + theme_bw() +
+  #xlab("Reportscore @ W0") + ylab("Reportscore after treatment") + 
+  scale_color_brewer(palette = "Set2")
+pcMs2
+
+
+pub.sign.comb.df <- pub.comb.df%>%filter(
+  abs(Reportscore.x)>2.59&abs(Reportscore.y)>2.59&Reportscore.x*Reportscore.y>0)
+ggplot(pub.sign.comb.df,aes(x=Reportscore.x,y=Reportscore.y,color=VS)) + 
+  geom_vline(xintercept = c(-2.59,-1.96,1.96,2.59),linetype=2) +
+  geom_hline(yintercept = c(-2.59,-1.96,1.96,2.59),linetype=2) +
+  geom_point()
+
+pub.sign.path.df <- NULL
+for(i in 1:3){
+  grp <- c("PD","SD","PR")[-i]
+  tag <- paste0(grp,collapse = "")
+  for(j in as.character(0:2)){
+    ipath <- pub.res.RS[[tag]][[j]]$path
+    ipath <- ipath[which(rownames(ipath)%in%select.map),]
+    if(is.null(ipath))
+      next
+    colnames(ipath)[ncol(ipath)-1:0] <- c("coverage_Nr","coverage_Dr")
+    pub.sign.path.df <- rbind(pub.sign.path.df,
+        data.frame(tag=tag,Ws=j,map=rownames(ipath),ipath))
+  }
+}
+
+pub.map.anno <- unique(pub.sign.path.df[,c(3:6)])
+pub.map.anno <- pub.map.anno[order(pub.map.anno$Level1),]
+
+pub.sign.path.mat <- dcast(pub.sign.path.df[,c(1:3,7)],map~tag+Ws,value.var = "Reportscore",fill = 0)
+rownames(pub.sign.path.mat) <- pub.sign.path.mat$map
+pub.sign.path.mat <- pub.sign.path.mat[as.character(pub.map.anno$map),-1]
+
+pheatmap(pub.sign.path.mat,cluster_cols = F,cluster_rows=F,
+         annotation_row = pub.map.anno[,2,F])
+
+pub.sam.phe <- as.data.frame(matrix(unlist(strsplit(colnames(pub.sign.path.mat),"_")),ncol=2,byrow=T))
+rownames(pub.sam.phe) <- colnames(pub.sign.path.mat)
+colnames(pub.sam.phe) <- c("group","Week")
+
+pheatmap(pub.sign.path.mat,cluster_cols = F,cluster_rows=F,
+         colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(8),
+         breaks=c(-10,-5,-2.59,-1.96,0,1.96,2.59,5,10),border_color="white",
+         annotation_row = pub.map.anno[,2,F],gaps_row = cumsum(table(pub.map.anno$Level1)),
+         annotation_col = pub.sam.phe[,2,F],gaps_col=cumsum(table(pub.sam.phe$group)))
+```
+
+
+### PUB | Caucation cohort | T0 & All
+
+*pathway
+```{r,dpi=1200,warning=FALSE}
+ALL.PDPR.W0.path.gt <- pathFun(ALL.PDPR.W0.path, "PDPR","NPC")
+grid.draw(ALL.PDPR.W0.path.gt)
+if(do.write){
+  ggsave(paste0(OTDIR,"ALL.PDPR.W0/pubALL.PDPR.W0.pathway.plot.pdf"),width = 14,height = 14)
+}
+
+ALL.PDPR.W0.path.anno <- path2mgs(ALL.PDPR.W0.path)
+ALL.PDPR.W0.path.test <- pathTest("ALL.PDPR.W0")
+ALL.PDPR.W0.00680 <- pickPathView(ALL.PDPR.W0.path.anno,ALL.PDPR.W0.path.test,
+                                "00680","./pubAll_BE3/ALL.PDPR.W0/","path")
+ALL.PDPR.W0.00290 <- pickPathView(ALL.PDPR.W0.path.anno,ALL.PDPR.W0.path.test,
+                                "00290","./pubAll_BE3/ALL.PDPR.W0/","path")
+ALL.PDPR.W0.03020 <- pickPathView(ALL.PDPR.W0.path.anno,ALL.PDPR.W0.path.test,"03020","./pubAll_BE3/ALL.PDPR.W0/","path")
+ALL.PDPR.W0.03010 <- pickPathView(ALL.PDPR.W0.path.anno,ALL.PDPR.W0.path.test,"03010","./pubAll_BE3/ALL.PDPR.W0/","path")
+
+#negative
+ALL.PDPR.W0.03070 <- pickPathView(ALL.PDPR.W0.path.anno,ALL.PDPR.W0.path.test,
+                                "03070","./pubAll_BE3/ALL.PDPR.W0/","path")
+ALL.PDPR.W0.00520 <- pickPathView(ALL.PDPR.W0.path.anno,ALL.PDPR.W0.path.test,
+                                "00520","./pubAll_BE3/ALL.PDPR.W0/","path")
+ALL.PDPR.W0.00540 <- pickPathView(ALL.PDPR.W0.path.anno,ALL.PDPR.W0.path.test,
+                                "00540","./pubAll_BE3/ALL.PDPR.W0/","path")
+ALL.PDPR.W0.02010 <- pickPathView(ALL.PDPR.W0.path.anno,ALL.PDPR.W0.path.test,
+                                "02010","./pubAll_BE3/ALL.PDPR.W0/","path")
+
+#plot abundance
+getSelected2 <- function(neg,pos,prf,phe,path,path.test,path.anno){
+  select.ko <- unique(path.test$KO[which(abs(path.test$zscore)>1.96)])
+
+  select.df0 <- melt(
+    data.frame(KO=select.ko,prf[select.ko,phe$DNAID[which(phe$MTime==0)]]),
+                     id.vars = "KO",variable.name = "DNAID",value.name = "Abundance")
+  select.df <- merge(merge(merge(select.df0,phe,by="DNAID"),path.anno,by="KO",all.x=T),
+                     data.frame(map=rownames(path),path),by="map")
+  mdFun <- function(d){
+    md_neg=median(d$Abundance[which(d$BE3==neg)])
+    md_pos=median(d$Abundance[which(d$BE3==pos)])
+    d$md_neg <- md_neg
+    d$md_pos <- md_pos
+    return(d)
+  }
+  select.df <- ddply(select.df,c("KO"),transform,mdFun)
+  select.df2 <- select.df%>%filter((Reportscore<0&md_neg>0)|(Reportscore>0&md_pos>0))
+  #select.ko2 <- as.character(unique(select.df2$KO))
+  select.df2$Abundance[which(select.df2$Abundance==0)] <- 1e-10
+  return(select.df2)
+}
+ALL.PDPR.W0.prf <- read.table(paste0("./pubAll_BE3/ALL.PDPR.W0/sub.prf"))
+ALL.PDPR.W0.phe <- read.table(paste0("./pubAll_BE3/ALL.PDPR.W0/.phe"))
+ALL.PDPR.W0.anno2 <- unique(ALL.PDPR.W0.path.anno[,3:4])
+
+ALL.PDPR.W0.df2 <- getSelected2("PD","PR",pub.ko.prf,cut.phe,
+                             ALL.PDPR.W0.path,ALL.PDPR.W0.path.test,ALL.PDPR.W0.anno2)
+ALL.PDPR.W0.sign.ko <- as.character(unique(ALL.PDPR.W0.df2$KO))
+
+ggplot(ALL.PDPR.W0.df2,aes(x=BE3,y=Abundance,fill=BE3)) + geom_boxplot() + geom_jitter(alpha=.3)+stat_compare_means(label="p.format") +
+  scale_y_log10() + facet_wrap(~Level2+KO,ncol=6,scale="free")
+
+
+```
+```{r}
+intersect(stA.PDPR.W0.sign.ko,ALL.PDPR.W0.sign.ko)
+
+
+tmp <- merge(stA.PDPR.W0.path,ALL.PDPR.W0.path[,4:6],by="row.names")
+ggplot(tmp,aes(x=Reportscore.x,y=Reportscore.y)) + geom_point()+
+  geom_abline(slope=1,intercept = 0)
+
+tmp2 <- merge(stA.PDPR.W0.modu,ALL.PDPR.W0.modu[,4:6],by="row.names")
+ggplot(tmp2,aes(x=Reportscore.x,y=Reportscore.y)) + geom_point()+
+  geom_abline(slope=1,intercept = 0)
+
+```
+
+### T1 
+```{r,dpi=1200,warning=FALSE}
+ALL.PDPR1.path.gt <- pathFun(ALL.PDPR1.path, "PDPR","NPC")
+grid.draw(ALL.PDPR1.path.gt)
+if(do.write){
+  ggsave(paste0(OTDIR,"ALL.PDPR1/pubALL.PDPR1.pathway.plot.pdf"),width = 14,height = 14)
+}
+
+ALL.PDPR1.path.anno <- path2mgs(ALL.PDPR1.path)
+ALL.PDPR1.path.test <- pathTest("ALL.PDPR1")
+ALL.PDPR1.00680 <- pickPathView(ALL.PDPR1.path.anno,ALL.PDPR1.path.test,
+                                "00680","./pubAll_BE3/ALL.PDPR1/","path")
+ALL.PDPR1.00290 <- pickPathView(ALL.PDPR1.path.anno,ALL.PDPR1.path.test,
+                                "00290","./pubAll_BE3/ALL.PDPR1/","path")
+ALL.PDPR1.03020 <- pickPathView(ALL.PDPR1.path.anno,ALL.PDPR1.path.test,"03020","./pubAll_BE3/ALL.PDPR1/","path")
+ALL.PDPR1.03010 <- pickPathView(ALL.PDPR1.path.anno,ALL.PDPR1.path.test,"03010","./pubAll_BE3/ALL.PDPR1/","path")
+
+#negative
+ALL.PDPR1.03070 <- pickPathView(ALL.PDPR1.path.anno,ALL.PDPR1.path.test,
+                                "03070","./pubAll_BE3/ALL.PDPR1/","path")
+ALL.PDPR1.00520 <- pickPathView(ALL.PDPR1.path.anno,ALL.PDPR1.path.test,
+                                "00520","./pubAll_BE3/ALL.PDPR1/","path")
+ALL.PDPR1.00540 <- pickPathView(ALL.PDPR1.path.anno,ALL.PDPR1.path.test,
+                                "00540","./pubAll_BE3/ALL.PDPR1/","path")
+ALL.PDPR1.02010 <- pickPathView(ALL.PDPR1.path.anno,ALL.PDPR1.path.test,
+                                "02010","./pubAll_BE3/ALL.PDPR1/","path")
+
+#plot abundance
+getSelected2 <- function(neg,pos,prf,phe,path,path.test,path.anno){
+  select.ko <- unique(path.test$KO[which(abs(path.test$zscore)>1.96)])
+
+  select.df0 <- melt(
+    data.frame(KO=select.ko,prf[select.ko,phe$DNAID[which(phe$MTime==0)]]),
+                     id.vars = "KO",variable.name = "DNAID",value.name = "Abundance")
+  select.df <- merge(merge(merge(select.df0,phe,by="DNAID"),path.anno,by="KO",all.x=T),
+                     data.frame(map=rownames(path),path),by="map")
+  select.df <- ddply(select.df,c("KO"),transform,
+                     md_neg=median(Abundance[which(BE3==neg)]),
+                     md_pos=median(Abundance[which(BE3==pos)]))
+  select.df2 <- select.df%>%filter((Reportscore<0&md_neg>0)|(Reportscore>0&md_pos>0))
+  #select.ko2 <- as.character(unique(select.df2$KO))
+  select.df2$Abundance[which(select.df2$Abundance==0)] <- 1e-10
+  return(select.df2)
+}
+ALL.PDPR1.prf <- read.table(paste0("./pubAll_BE3/ALL.PDPR1/sub.prf"))
+ALL.PDPR1.phe <- read.table(paste0("./pubAll_BE3/ALL.PDPR1/.phe"))
+ALL.PDPR1.anno2 <- unique(ALL.PDPR1.path.anno[,3:4])
+
+ALL.PDPR1.df2 <- getSelected2("PD","PR",pub.ko.prf,cut.phe,
+                             ALL.PDPR1.path,ALL.PDPR1.path.test,ALL.PDPR1.anno2)
+ALL.PDPR1.sign.ko <- as.character(unique(ALL.PDPR1.df2$KO))
+
+ggplot(ALL.PDPR1.df2,aes(x=BE3,y=Abundance,fill=BE3)) + geom_boxplot() + geom_jitter(alpha=.3)+stat_compare_means(label="p.format") +
+  scale_y_log10() + facet_wrap(~Level2+KO,ncol=6,scale="free")
+
+
+```
+
+
+```{r,warning=FALSE}
+library(phyloseq)
+ko.comm0and46.PDPR.base.marker <- intersect(stA.PDPR.W0.sign.ko,stA.PDPR.t36.sign.ko)
+ko.comm0and46.PDSD.base.marker <- intersect(stA.PDSD.W0.sign.ko,stA.PDSD46.sign.ko)
+ko.comm0and46.SDPR.base.marker <- intersect(stA.SDPR.W0.sign.ko,stA.SDPR46.sign.ko)
+
+union.stA0.sign.ko <- union(union(stA.PDPR.W0.sign.ko,stA.PDSD.W0.sign.ko),stA.SDPR.W0.sign.ko)
+#
+the.prf <- as.matrix(ko.prf[union.stA0.sign.ko,ts0.phe$DNAID])
+
+rlb.dist <- betadiver(t(the.prf),method="rlb")
+pcoa_bray <- mypcoa(rlb.dist)
+pcoa_data <- data.frame(pcoa_bray$vectors[,c(1,3)])
+colnames(pcoa_data) <- c("PC1", "PC2")
+eig <- pcoa_bray$values[,1]
+pc1 <- eig[1]/sum(eig)*100
+pc2 <- eig[2]/sum(eig)*100
+pc1 <- paste0("PC1(",round(pc1,2),"%)")
+pc2 <- paste0("PC2(",round(pc2,2),"%)")
+### merge data frame
+#rownames(cc2.phe) <- cc2.phe$DNAID
+pcoa_data2 <-merge(pcoa_data, tsALL.phe, by = "row.names")
+
+ggplot(pcoa_data2,aes(x=PC1,y=PC2,color=BE3)) + geom_point() + #facet_wrap(~cohort,ncol=4) +
+  coord_fixed() + theme(legend.position = "top") + stat_ellipse(aes(color=BE3)) +
+  xlab(pc1)+ylab(pc2)
+
+```
+
+```{r}
+p = ggplot(df%>%filter(distance=="rlb"), aes(Axis.1, Axis.2, color=BE3,shape=cohort))
+p = p + geom_point(size=3, alpha=0.5) + stat_ellipse(aes(group=BE3))
+p = p + facet_wrap(~cohort, scales="free")
+p = p + ggtitle("MDS on various distance metrics for Enterotype dataset")
+p
+
+```

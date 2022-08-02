@@ -1,0 +1,198 @@
+---
+title: "Enterotype"
+output:
+  html_notebook:
+    code_fold: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+source("../common.R")
+
+do.write <- F
+outdir <- "../../../Result/IDMAP/"
+if(do.write&!dir.exists(outdir)){dir.create(outdir)}
+```
+
+
+# mapping the available sampling IDs to phenotype
+
+```{r}
+# Load thr1st,patSum,pat3M,Nthr,evaDat,pat3M0,pat3M1
+load("../../Result/Phenotype/NPC/phenotype.NPC.Rmd.RData")
+FDNA <- read.csv("../../Result/Phenotype/sublist.FecalTime.info.20181108.csv",
+                 stringsAsFactors =F)[,c(2,4,5,6)] # Exported from metadata phenotype.xlsx
+
+```
+
+### get sampling time
+```{r}
+FDNA$Date <- sub( ' 00:00','',FDNA$Date)
+FDNA$Date <- as.Date(FDNA$Date,"%m/%d/%Y")
+
+mdat <- merge(patSum,FDNA,by="PID")
+mdat$Day <- mdat$Date - mdat$Thr1st
+mdat1 <- ddply(mdat[which(!is.na(mdat$Day)),],"PID",chooseCT)
+patDNAA <- mdat1
+
+ggplot(mdat,aes(x=Day,y=PID,color=BestEvaluation)) + geom_point() + geom_line() +
+  facet_wrap(~Treatment,ncol=3,scales="free")
+
+ggplot(mdat,aes(x=Day,y=PID,color=BestEvaluation)) + geom_point() + geom_line() +
+  facet_wrap(~Treatment,ncol=3,scales="free") +xlim(c(-14,120))
+```
+
+
+**Screen ATB usage**  
+```{r, warning=FALSE}
+levels(atbDat$Treatment) <- levels(patDNAA$Treatment)[3:1]
+atb.PID <- as.character(unique(atbDat$PID))
+ggplot(patDNAA%>%filter(PID%in%atb.PID), aes(x=Day, y=PID))+
+  geom_point(alpha=.5,stroke=1.2)+ theme_bw()+ 
+  geom_point(data=allTimeDat%>%filter(type=="evaluation"&PID%in%atb.PID),aes(color=Evaluation))+
+  geom_point(data=atbDat,aes(x=ATB.Day),shape=4,size=2,color="red") +
+  facet_wrap(~Treatment,ncol=3,scales="free") +
+  scale_shape_manual(values=c(4,3,1))+
+  scale_x_continuous(breaks=seq(-30,120,30),limits=c(-30,120)) +
+  xlab("# month since the first therapy")
+
+atb.risk.PID <- c("P004","P008","P117","P059","P034","P038","P056","P068","P162","P048","P099","P051","P062")
+atb.risk.PID <- c("P034","P038","P056","P068","P162","P099","P051","P062")
+atb.risk.PID <- c("P034","P038","P056","P068","P162","P048","P099","P051","P062")
+atb.risk.PID <- c("P010","P022","P028","P035","P155","P025")
+if(do.write){
+  write.csv(atb.risk.PID,"../../Result/Phenotype/ATB.risk.PID.csv",row.names = F,col.names = F)
+}
+```
+
+
+```{r}
+#### Optional 2
+PFS.u <- patSum
+PFS.u$ATBR <- ifelse(PFS.u$PID%in%atb.risk.PID,"Antibiotic","Control")
+PFS.u$ATBR <- factor(PFS.u$ATBR, levels=names(table(PFS.u$ATBR))[c(2,1)])
+PFS.u$PD.Day[which(is.na(PFS.u$PD.Day))] <- 190
+pNum3<- table(PFS.u$ATBR)
+pNum3
+PFSD2 <- data.frame(Day=seq(0,180),Control=pNum3[1],Antibiotic=pNum3[2])
+PFSD2 <- melt(PFSD2,id.vars = "Day", variable.name = "Group",value.name = "Num")
+PFSD2$change <- F
+
+for(i in 1:nrow(PFS.u)){
+  grp <- as.character(PFS.u$ATBR[i])
+  PFSD2$Num[which(PFSD2$Group==grp&PFSD2$Day>=PFS.u$PD.Day[i])] <- 
+  PFSD2$Num[which(PFSD2$Group==grp&PFSD2$Day>=PFS.u$PD.Day[i])] - 1
+  PFSD2$change[which(PFSD2$Group==grp&PFSD2$Day==PFS.u$PD.Day[i])] <- T
+}
+PFSD2$PFS <- 0
+PFSD2$PFS[which(PFSD2$Group=="Control")] <- PFSD2$Num[which(PFSD2$Group=="Control")]/pNum3[1]
+PFSD2$PFS[which(PFSD2$Group=="Antibiotic")] <- PFSD2$Num[which(PFSD2$Group=="Antibiotic")]/pNum3[2]
+
+### PLOT ###
+ggplot(PFSD2,aes(x=Day,color=Group,y=PFS)) + 
+  geom_point(data=PFSD2[which(PFSD2$change==T),]) +
+  geom_step(size=1,alpha=.7) + scale_color_manual(values = c("black","brown1")) +
+  scale_x_continuous(breaks = seq(0,180,30),labels=seq(0,6,1)) + 
+  scale_y_continuous(breaks=seq(0,1,0.2),labels=seq(0,1,0.2)*100) + ylab("PFS(%)") + xlab("Month") +
+  theme_bw() + theme(legend.position = c(.01,.01),legend.justification = c(0,0))
+
+if(do.write){
+  ggsave(filename = paste0(dirname,"/NPC.antibiotic.PFScurve.pdf"))
+}
+```
+
+```{r}
+
+chisq.test(PFS.u$ATBR,PFS.u$PFS3m)
+```
+
+
+
+## Find sample before/after ATB used
+```{r}
+ggplot(patDNAA %>% filter(PID%in%atb.PID),aes(x=Day,y=PID)) + geom_point(shape=4) +
+  geom_point(data=atbDat,aes(x=ATB.Day,y=PID),color="red") + xlim(c(-14,120))
+
+findATB_before_after_sample <- function(d){
+  pid <- as.character(d$PID[1])
+  pid.atb <- atbDat[which(atbDat$PID==pid),]
+  res <- NULL
+  DNA <- d$DNAID
+  for(i in 1:nrow(pid.atb)){
+    diff.t <- as.numeric(d$Day - pid.atb$ATB.Day[i])
+    n <- length(diff.t)
+    
+    if(length(which(diff.t<0)) >0 ){
+      bfi <- rank(1/as.numeric(diff.t))[1]
+      bf.DNAID <- d$DNAID[bfi]
+      bf.Day<-d$Day[bfi]
+    }else{
+      bf.DNAID=NA
+      bf.Day=NA
+    }
+    
+    if(length(which(diff.t>0)) >0){
+      afi <- rank(1/as.numeric(diff.t))[n]
+      af.DNAID <- as.character(DNA[afi])
+      af.Day<-d$Day[afi]
+    }else{
+      af.DNAID="DNAUNKNOWN"
+      af.Day=0
+    }
+    
+    if(length(which(diff.t<0)) >0 & length(which(diff.t>0))>0){
+      pair = "found" 
+    }else {
+      pair = "missing"
+    }
+    t <- data.frame(PID=pid,ATB.Day=pid.atb$ATB.Day[i],pair=pair,
+                    bf.DNAID=bf.DNAID,bf.Day=bf.Day,
+                    af.DNAID=af.DNAID,af.Day=af.Day
+                    )
+    res<- rbind(res,t)
+  }
+  return(res)
+}
+
+bf.atb.dat <- ddply(patDNAA %>% filter(PID%in%atb.PID),"PID",
+                    .fun=findATB_before_after_sample)
+```
+
+
+
+```{r}
+
+mdat2 <- mdat1[which(!is.na(mdat1$CTgrp)),]
+
+patDNA0 <- mdat
+patDNA3 <- merge(patSum,mdat2[,c("PID","CTgrp","DNAID")],by=c("PID"))
+
+if(do.write){
+  save(patDNA0,patDNA3,patDNAA,atb.risk.PID,file="../../Result/Phenotype/NPC/FecalDNA.Rmd.RData")
+  write.csv(bf.atb.dat,paste0("../../Result/Phenotype/NPC/sample.before.after.ATB.csv"), row.names=F)
+}
+```
+
+### stat
+```{r}
+table(patDNA3$CTgrp)
+ggplot(patDNA3,aes(x=CTgrp,y=..count..)) + geom_bar()
+```
+84 subjects donate at least one feces samples ( P141 missed the baseline sample ).  
+After 3 months treatment, only about 20% subjects remained ( some of them quited because of bad condition)
+
+
+```{r}
+mdat0 <- merge(patSum,FDNA,by="PID",all.x=T)
+mdat$Day <- mdat$Date - mdat$Thr1st
+```
+
+
+
+
+
+
+#Fin.

@@ -1,0 +1,348 @@
+---
+title: "Spearman correlation of patients over timeline"
+output:
+  html_notebook:
+    code_fold: hide
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(pheatmap)
+library(parallel)
+library(plyr)
+library(cowplot)
+library(dplyr)
+library(ggpubr)
+source("../../common.R")
+do.write <- F
+```
+
+```{r, include=FALSE}
+
+# Load thr1st,patSum,pat3M,Nthr,evaDat,pat3M0,pat3M1
+#load("../../../Result/Phenotype/NPC/phenotype.NPC.Rmd.RData")
+#MA.phe <- pat3M
+#MA.phe$Timepoint <- as.factor(MA.phe$CTgrp)
+#levels(MA.phe$Timepoint) <- c("M0","M1","M2","M3")
+
+# Load pymphocytes
+#hm.phe <- read.csv("../../../Result/Phenotype/export.lymphocytes.20190611.csv")[,c(1:11,16)]
+#hm0.phe <- hm.phe%>%filter(Timepoint=="M0"&PID!="P006"&!is.na(ALL)&Tumor_Type=="NPC")
+#rownames(hm0.phe) <- as.character(hm0.phe$PID)
+
+
+#Load HLA.mdat
+#phe.HLA.csv <- read.csv("../../../Result/HLA/57_PD1_NPC.2020-4-14.csv")
+#phe.HLA.csv$TMB.grp <- ifelse(phe.HLA.csv$TMBnew>median(phe.HLA.csv$TMBnew[!is.na(phe.HLA.csv$TMBnew)]),"high","low")
+
+# Load immunity data
+#immune <- read.csv("../../../Result/Phenotype/history/sublist.Immune.info.20180225.fix.csv")
+
+#immune.EBV <- data.frame(var="EBV",immune[,1:6])
+#immune.CD8 <- data.frame(var="CD8",immune[,c(1:4,7,8)])
+#immune.CD48 <- data.frame(var="CD48",immune[,c(1:4,9,10)])
+#immune.INFG <- data.frame(var="INFG",immune[,c(1:4,11,12)])
+#immune.CRP <- data.frame(var="CRP",immune[,c(1:4,13,14)])
+
+#colnames(immune.EBV)[6:7] <- c("Date","value")
+#colnames(immune.CD8)[6:7] <- c("Date","value")
+#colnames(immune.CD48)[6:7] <- c("Date","value")
+#colnames(immune.INFG)[6:7] <- c("Date","value")
+#colnames(immune.CRP)[6:7] <- c("Date","value")
+
+#immune.df <- merge(thr1st,rbind(immune.EBV,immune.CD8,immune.CD48,immune.INFG,immune.CRP),by="PID")
+#immune.df$Date <- as.Date(as.character(immune.df$Date),"%Y/%m/%d")
+#immune.df$Day <- immune.df$Date - immune.df$Thr1st
+#immune.df <- ddply(immune.df%>%filter(!is.na(Date)),c("PID","var"),chooseCT)
+#immune.df$value <- ifelse(immune.df$value=="<2.5",2.5,immune.df$value)
+#immune.df$value <- as.numeric(immune.df$value)
+#immune.mdf <- dcast(immune.df%>%filter(!is.na(CTgrp)),PID+CTgrp~var,value.var = "value",fill = NA)
+#immune.mdf$Timepoint <- as.factor(immune.mdf$CTgrp)
+#levels(immune.mdf$Timepoint) <- c("M0","M1","M2","M3")
+# merge
+
+#merge.df <- merge(MA.phe,merge(hm.phe,immune.mdf,by=c("PID","Timepoint")))
+#phe.HLA.csv <- read.csv("../../../Result/HLA/57_PD1_NPC.2020-4-14.csv")
+#CTgrp3 <- read.csv("../../../Result/Phenotype/Phenotype.CTgrp3.csv")
+# tmp1 <- CTgrp3[,c("PID","CTgrp","EBV","CD4","IFNG","Tumor_Size","Blood_IgA","Fecal_IgA")]
+# tmp2 <- merge.df[,c("PID","CTgrp","EBV","CD8","INFG")]
+# tmp <- merge(tmp1,tmp2,by=c("PID","CTgrp"),all=T)
+
+#a <- phe.HLA.csv[,c("PID","EBV")]
+#aa <- merge(a,tmp1,by=c("PID"),all=T) # 比较merge.df phe.HLA.csv两个文件中EBV信息,最终确认以Phenotype.CTgrp3.csv中的信息为准
+
+```
+
+
+### 1. load data
+> 1).  57 patients and 3 timepoints' phenotype.
+        1. phe.HLA.csv -- TMBnew(only M0)
+        2. CTgrp3.57 -- EBV Blood_IgA Fecal_IgA IFNG Tumor_Size (M0-M3)
+        3. immune.57.info -- CD4 CD8(M0-M3)
+
+```{r}
+# Load thr1st,patSum,pat3M,Nthr,evaDat,pat3M0,pat3M1
+#load("../../../Result/Phenotype/NPC/phenotype.NPC.Rmd.RData")
+
+#Load HLA.mdat 
+phe.HLA.csv <- read.csv("../../../Result/HLA/57_PD1_NPC.2020-4-14.csv")
+
+# load phenotype
+CTgrp3 <- read.csv("../../../Result/Phenotype/Phenotype.CTgrp3.csv")
+CTgrp3.57 <- CTgrp3%>%filter(PID%in%phe.HLA.csv$PID)
+
+pheno.57 <- subset(CTgrp3.57, select = -c(CD4))
+pheno.57 <- pheno.57[,c("PID","DNAID","PIDCT","Tumor_Type","EBV","HospitalID","Blood_IgA","Fecal_IgA","IFNG","Tumor_Size","CTgrp")]
+
+
+
+# load immune info
+immune.57.info <- read.csv("../../../Result/Phenotype/immune.57.merge.CT3.20210114.csv")
+immune.57.info <- immune.57.info[,c("PID","CTgrp","CD4","CD8")]
+
+# M03 info
+merge.df.57 <-full_join(immune.57.info,pheno.57,by = c("PID","CTgrp")) # merge.df.57为整合文件
+merge.df.57 <- merge(merge.df.57,phe.HLA.csv[,c("PID","BestEvaluation","TMBnew")])
+merge.df.57$IFNG[merge.df.57$IFNG == "<2.5"] <- 2.5
+merge.df.57$BestEvaluation <- factor(merge.df.57$BestEvaluation,levels=c("PD","SD","PR"))
+merge.df.57.b <- merge.df.57%>%filter(CTgrp == "baseline")
+
+
+```
+
+
+#### 2. Display 
+
+> * phe-phe : CD8 \ EBV
+
+```{r}
+
+cor(merge.df.57.b$EBV,merge.df.57.b$CD8,method="s",use="pairwise.complete.obs")
+cor.fun <- function(d){
+  res <- cor(d$CD8,d$EBV,method="s",use="pairwise.complete.obs")
+  return(cbind(d[1,c("BestEvaluation"),F],r=res))
+}
+ddply(merge.df.57.b,"BestEvaluation",cor.fun)
+p <- ggplot(merge.df.57.b,aes(x=EBV,y=CD8)) + 
+  geom_point(aes(color=BestEvaluation))+ stat_smooth(method=lm,aes(color=BestEvaluation)) +
+  theme_bw() + xlab("EBV (log10 scale)") + ylab("CD8") +
+  ggtitle("Correlation between EBV and CD8 (r=-0.022) ")+
+  scale_color_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6"))+scale_x_log10()
+
+p
+
+
+```
+
+
+> * phe-phe : tumor size \ EBV
+
+```{r}
+cor(merge.df.57.b$EBV, merge.df.57.b$Tumor_Size,method="s",use="pairwise.complete.obs")
+px <- ggplot(merge.df.57.b,aes(x=EBV,y=Tumor_Size)) + 
+  geom_point(aes(color=BestEvaluation))+ stat_smooth(method=lm,aes(color=BestEvaluation)) +
+  theme_bw() + xlab("EBV (log10 scale)") + ylab("Tumor_Size") + 
+  ggtitle("Correlation between EBV and Tumor_Size (r=0.41) ")+
+  scale_color_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6"))+scale_x_log10()
+px
+
+```
+
+
+>* phe=phe : TMB \ EBV
+
+```{r}
+cor(merge.df.57.b$EBV,merge.df.57.b$TMBnew,method="s",use="pairwise.complete.obs")
+
+ptmb <- ggplot(merge.df.57.b,aes(x=EBV,y=TMBnew)) + 
+  geom_point(aes(color=BestEvaluation),size = 2)+ stat_smooth(method=lm,aes(color=BestEvaluation), alpha = 0.2) +
+  theme_bw() + xlab("EBV (log10 scale)") + ylab("TMB") +
+  ggtitle("Correlation between EBV and TMB (r=-0.14) ")+
+  scale_color_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6")) + scale_x_log10() 
+
+ptmb
+
+p.combe <- plot_grid(p, px, ptmb,ncol = 1)
+
+if(do.write){
+  ggsave(p.combe,file="../../../Result/Phenotype/CD8.TMB.Tumor_size.EBV.baseline.comparison.plot.pdf",width=7,heigh=10)
+}
+```
+
+
+```{r}
+# CD8
+p1 <- ggplot(merge.df.57.b,aes(x=BestEvaluation,y=CD8)) + 
+  geom_boxplot(aes(fill=BestEvaluation)) +
+  geom_point(size = 1) +
+  theme_classic() + 
+  stat_compare_means(label="p.format")+
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6")) 
+
+
+# Tumor_Size
+p2 <- ggplot(merge.df.57.b,aes(x=BestEvaluation,y=Tumor_Size)) + 
+  geom_boxplot(aes(fill=BestEvaluation)) +
+  geom_point(size = 1) +
+  theme_classic() + 
+  stat_compare_means(label="p.format")+
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6")) 
+
+
+# CD4
+p3 <- ggplot(merge.df.57.b,aes(x=BestEvaluation,y=CD4)) + 
+  geom_boxplot(aes(fill=BestEvaluation)) +
+  geom_point(size = 1) +
+  theme_classic() + 
+  stat_compare_means(label="p.format")+
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6"))
+
+
+# IFNg
+merge.df.57.b$IFNG <- as.numeric(as.character(merge.df.57.b$IFNG))
+p4 <- ggplot(merge.df.57.b,aes(x=BestEvaluation,y=IFNG)) + 
+  geom_boxplot(aes(fill=BestEvaluation)) +
+  geom_point(size = 1) + scale_y_log10()+
+  theme_classic() + 
+  stat_compare_means(label="p.format")+
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6")) 
+
+
+p.combe1 <- plot_grid(p1, p2, p3, p4 ,labels = c())
+p.combe1
+if(do.write){
+  ggsave(p.combe1,file="../../../Result/Phenotype/CD8.4.IFNG.Tumor_size.baseline.comparison.plot.pdf",width=6,heigh=6)
+}
+
+```
+
+
+
+
+# EBV  
+```{r}
+pheno.57 <- merge.df.57%>%filter(CTgrp != "treat.3m")
+pheno.57$EBV[pheno.57$EBV == 0] <- 0.01
+discard.PID <- unique((pheno.57%>%filter(is.na(EBV)))$PID)
+
+pheno.41 <- pheno.57%>%filter(!PID%in%discard.PID)
+
+table(pheno.41$CTgrp,pheno.41$BestEvaluation)
+
+pebv <- ggplot(pheno.41,aes(x=BestEvaluation,y=EBV)) + 
+  geom_boxplot(aes(fill = BestEvaluation)) +
+  geom_line(aes(group=PID,color=BestEvaluation),alpha=.5) +
+  geom_point(size = 1) +
+  facet_grid(.~CTgrp)+scale_y_log10()+
+  theme_classic() + labs(x="", y="EBV (log 10)") +
+  stat_compare_means(label="p.format") + 
+  ggtitle("EBV") + 
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6"))
+
+pebv
+
+if(do.write){
+  ggsave(pebv,file="../../../Result/Phenotype/EBV.M02.comparison.plot.pdf",width=6,heigh=4)
+}
+```
+
+# IFNG
+```{r}
+pheno.57 <- merge.df.57%>%filter(CTgrp != "treat.3m")
+pheno.57 <- pheno.57%>%filter(IFNG != "NA")
+pheno.57$BestEvaluation <- factor(pheno.57$BestEvaluation,levels=c("PD","SD","PR"))
+pheno.57$IFNG <- as.numeric(as.character(pheno.57$IFNG))
+
+pifng <- ggplot(pheno.57,aes(x=BestEvaluation,y=IFNG)) + 
+  geom_boxplot(aes(fill = BestEvaluation)) +
+  geom_line(aes(group=PID,color=BestEvaluation),alpha=.5) +
+  geom_point(size = 1) +
+  facet_grid(.~CTgrp)+scale_y_log10()+
+  theme_classic() + labs(x="", y="IFNG (log 10)") +
+  stat_compare_means(label="p.format") + 
+  ggtitle("IFNG") + 
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6"))
+
+pifng <- plot_grid(pifng,labels = c(""))
+pifng
+if(do.write){
+  ggsave(pifng,file="../../../Result/Phenotype/IFNG.M02.comparison.plot.pdf",width=6,heigh=4)
+}
+
+```
+
+# Tumor_Size
+
+```{r}
+pheno.57 <- merge.df.57%>%filter(CTgrp != "treat.3m")
+pheno.57 <- pheno.57%>%filter(Tumor_Size != "NA")
+pheno.57$BestEvaluation <- factor(pheno.57$BestEvaluation,levels=c("PD","SD","PR"))
+
+ptms <- ggplot(pheno.57,aes(x=BestEvaluation,y=Tumor_Size)) + 
+  geom_boxplot(aes(fill = BestEvaluation)) +
+  geom_line(aes(group=PID,color=BestEvaluation),alpha=.5) +
+  geom_point(size = 1) +
+  facet_grid(.~CTgrp)+scale_y_log10()+
+  theme_classic() + labs(x="", y="Tumor_Size (log 10)") +
+  stat_compare_means(label="p.format") + 
+  ggtitle("Tumor_Size") + 
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6"))
+
+ptms
+if(do.write){
+  ggsave(ptms,file="../../../Result/Phenotype/TumorSize.M02.comparison.plot.pdf",width=6,heigh=4)
+}
+
+```
+
+
+# CD4
+
+```{r}
+pheno.57 <- merge.df.57%>%filter(CTgrp != "treat.2m")
+discard.PID <- unique((pheno.57%>%filter(is.na(CD4)))$PID)
+pheno.63 <- pheno.57%>%filter(!PID%in%discard.PID)
+table(pheno.63$CTgrp,pheno.63$BestEvaluation)
+
+pcd4 <- ggplot(pheno.57,aes(x=BestEvaluation,y=CD4)) + 
+  geom_boxplot(aes(fill = BestEvaluation)) +
+  geom_line(aes(group=PID,color=BestEvaluation),alpha=.5) +
+  geom_point(size = 1) +
+  facet_grid(.~CTgrp)+
+  theme_classic() + labs(x="", y="CD4") +
+  stat_compare_means(label="p.format") + 
+  ggtitle("CD4") + 
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6"))
+
+pcd4
+if(do.write){
+  ggsave(pcd4,file="../../../Result/Phenotype/CD4.M03.comparison.plot.pdf",width=6,heigh=4)
+}
+
+```
+
+# CD8
+
+```{r}
+pheno.57 <- merge.df.57%>%filter(CTgrp != "treat.2m")
+discard.PID <- unique((pheno.57%>%filter(is.na(CD8)))$PID)
+pheno.63 <- pheno.57%>%filter(!PID%in%discard.PID)
+table(pheno.63$CTgrp,pheno.63$BestEvaluation)
+
+pcd8 <- ggplot(pheno.57,aes(x=BestEvaluation,y=CD8)) + 
+  geom_boxplot(aes(fill = BestEvaluation)) +
+  geom_line(aes(group=PID,color=BestEvaluation),alpha=.5) +
+  geom_point(size = 1) +
+  facet_grid(.~CTgrp)+
+  theme_classic() + labs(x="", y="CD8") +
+  stat_compare_means(label="p.format") + 
+  ggtitle("CD8") + 
+  scale_fill_manual(values = c("#d7191c", "#abd9e9", "#2c7bb6"))
+
+pcd8
+if(do.write){
+  ggsave(pcd8,file="../../../Result/Phenotype/CD8.M03.comparison.plot.pdf",width=6,heigh=4)
+}
+
+```

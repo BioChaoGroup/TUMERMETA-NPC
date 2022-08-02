@@ -1,0 +1,239 @@
+---
+title: "alpha-diversity"
+output:
+  html_notebook:
+    code_fold: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(ape)
+library(vegan)
+library(RColorBrewer)
+
+do.write<-F
+```
+
+#  Load data
+* shannon index
+* CTgroup phenotype
+```{r, warning=FALSE}
+# Load thr1st,patSum,pat3M,Nthr,evaDat,pat3M0,pat3M1
+load("../../../Result/Phenotype/NPC/phenotype.NPC.Rmd.RData")
+# Load patDNA0,patDNA3
+load("../../../Result/Phenotype/NPC/FecalDNA.Rmd.RData")
+
+#TMB
+TMB.info <- read.csv("../../../Result/Phenotype/curated.HLA-E.info.csv")
+
+#FDNA.NS,FDNA.NPC.pick2,FDNA.NPC.pick3,FDNA.NS.pick2,FDNA.NS.pick3
+load(md5("../../../Result/TimeSeries/NPC/FDNA.NPC.picks.RData","03e2f415886ab16c2a0433056a59522b"))
+#Load phe.all.NPC,phe.gut.NPC,phe.base.gut.NPC,NPC.PID,NPC.ATB.PID
+load(md5("../../../Result/Phenotype/NPC/NPC62.phe.RData","8e0c62576fff1b421f1c197cb6368957" ))
+
+
+IGC.bray.dist <- read.table("../../../Result/permanova/MGS2.bray_distance")
+IGC.eu.dist <- read.table("../../../Result/permanova/MGS2.euclidean_distance")
+
+tsALL.phe <- merge(FDNA.NS[,c("DNAID","WTimes","E","BMI","shan")],patDNAA,by="DNAID")
+
+
+```
+
+# Curation
+```{r}
+reshapeDist <- function(d,p,ID,g1,g2=NULL){
+  id <- which(colnames(p)==ID)
+  l1 <- levels(as.factor(p[,which(colnames(p)==g1)]))
+  
+  res <- NULL
+  for(x in l1){
+    p1 <- p[which(p[,which(colnames(p)==g1)]==x),]
+    l2 <- levels(as.factor(p1[,which(colnames(p1)==g2)]))
+    for(y in l2){
+      p2 <- p1[which(p1[,which(colnames(p1)==g2)]==y),]
+      IDs <- as.character(p2[,id])
+      if(length(IDs)>1){
+        cd <- d[IDs,IDs]
+        for(i in 1:(length(IDs)-1)){
+          for(j in (i+1):length(IDs)){
+            res <- rbind(res,
+            data.frame(g1=x,g2=y,ID1=IDs[i],ID2=IDs[j],dist=cd[i,j]))
+          }
+        }
+      }
+    }
+  }
+  return(res)
+}
+```
+
+```{r}
+d2.bray.df <- reshapeDist(IGC.bray.dist,FDNA.NPC.pick2,"DNAID","Ws","BE3")
+colnames(d2.bray.df)[1:2] <- c("Ws","BE3")
+d3.bray.df <- reshapeDist(IGC.bray.dist,FDNA.NPC.pick3,"DNAID","Ms","BE3")
+colnames(d3.bray.df)[1:2] <- c("Ms","BE3")
+
+```
+```{r}
+pb1 <- ggplot(d2.bray.df, aes(x=Ws, y=dist, fill=BE3))+ 
+  geom_boxplot(outlier.shape=NA)+theme_classic() + 
+  theme(legend.direction = "horizontal",legend.position=c(0.7,0.2)) +
+  labs(title="Beta diversity(bray)", x="Weeks", y="distance")+ 
+  scale_fill_brewer(palette="Set1") +
+  stat_compare_means(label="p.signif")
+pb1
+
+pb2 <- ggplot(d3.bray.df, aes(x=Ms, y=dist, fill=BE3))+ 
+  geom_boxplot(outlier.shape=NA)+theme_classic() + 
+  theme(legend.direction = "horizontal",legend.position=c(0.7,0.1)) +
+  labs(x="Month", y="Beta diversity(bray)",fill="Response") +
+  scale_fill_brewer(palette="Set1") +
+  stat_compare_means(label="p.format")
+pb2
+
+if(do.write){
+  save(d.bray.df,file="../../../Result/Diversity/d.bray.df.RData")
+  ggsave(pb2,file="../../../Result/Diversity/d.bray.df.Ms.boxplot.pdf",width=4,heigh=3)
+}
+```
+
+**Ws**
+```{r}
+d2b.bray.df <- reshapeDist(IGC.bray.dist,FDNA.NS.pick2%>%filter(Ws!="W18"),"DNAID","Ws","BE3")
+colnames(d2b.bray.df)[1:2] <- c("Ws","BE3")
+
+d2b.df.more <- merge(
+  merge(d2b.bray.df,FDNA.NS.pick2[,c("DNAID","PID","Day")],by.x="ID1",by.y="DNAID"),
+  FDNA.NS.pick2[,c("DNAID","PID","Day")],by.x="ID2",by.y="DNAID")
+d2b.df.more$Day <- (d2b.df.more$Day.x+d2b.df.more$Day.y )/2
+#d2b.df.more$Day[which(d2b.df.more$Ws=="W0")] <- d2b.df.more$Day[which(d2b.df.more$Ws=="W0")] -3
+#d2b.df.more$stage <- ifelse(d2b.df.more$Ws=="W0","0before","1after")
+pbw <- ggplot(d2b.df.more, aes(x=Day, y=dist, color=BE3))+ 
+  geom_point(aes(color=BE3),alpha=.5,size=.1) +
+  labs(x="Weeks", y="Beta diversity (Bray-Curtis)",color="Response") +
+  scale_fill_brewer(palette="Set1") + scale_color_brewer(palette="Set1") +
+  scale_x_continuous(breaks=seq(0,126,14),labels=paste0("W",seq(0,18,2))) +
+  scale_y_continuous(breaks=seq(0.5,1,0.1)) + 
+  stat_smooth(aes(group=BE3,color=BE3),alpha=.2) + theme_classic() + 
+  theme(legend.direction = "horizontal",legend.position=c(0.55,0.1))
+pbw
+if(do.write){
+  ggsave(pbw,file="../../../Result/BetaDiversity/d.bray.df.Ws.smooth.pdf",width=5,heigh=3)
+}
+```
+**Ms**
+```{r}
+d3b.bray.df <- reshapeDist(IGC.bray.dist,FDNA.NS.pick3%>%filter(Ws!="W18"),"DNAID","Ms","BE3")
+colnames(d3b.bray.df)[1:2] <- c("Ms","BE3")
+
+d3b.df.more <- merge(
+  merge(d3b.bray.df,FDNA.NS.pick3[,c("DNAID","PID","Day")],by.x="ID1",by.y="DNAID"),
+  FDNA.NS.pick2[,c("DNAID","PID","Day")],by.x="ID2",by.y="DNAID")
+d3b.df.more$Day <- (d3b.df.more$Day.x+d3b.df.more$Day.y )/2
+pbm <- ggplot(d3b.df.more, aes(x=Day, y=dist, color=BE3))+ 
+  geom_point(aes(color=BE3),alpha=.5,size=.1) +
+  labs(x="Weeks", y="Beta diversity (Bray-Curtis)",color="Response") +
+  scale_fill_brewer(palette="Set1") + scale_color_brewer(palette="Set1") +
+  scale_x_continuous(breaks=seq(0,126,28),labels=paste0("M",seq(0,4,1))) +
+  scale_y_continuous(breaks=seq(0.5,1,0.1)) + 
+  stat_smooth(aes(group=BE3,color=BE3),alpha=.2) + theme_classic() + 
+  theme(legend.direction = "horizontal",legend.position=c(0.55,0.1))
+pbm
+if(do.write){
+  ggsave(pbm,file="../../../Result/BetaDiversity/d.bray.df.Ms.smooth.pdf",width=5,heigh=3)
+}
+```
+
+### without antibiotic 
+```{r}
+d2.ATBF.bray.df <- reshapeDist(IGC.bray.dist,FDNA.NPC.pick2%>%filter(ATB02==F),"DNAID","Ws","BE3")
+colnames(d2.ATBF.bray.df)[1:2] <- c("Ws","BE3")
+d3.ATBF.bray.df <- reshapeDist(IGC.bray.dist,FDNA.NPC.pick3%>%filter(ATB02==F),"DNAID","Ms","BE3")
+colnames(d3.ATBF.bray.df)[1:2] <- c("Ms","BE3")
+
+ggplot(d2.ATBF.bray.df, aes(x=Ws, y=dist, fill=BE3))+ 
+  geom_boxplot(outlier.shape=NA)+theme_classic() + 
+  theme(legend.direction = "horizontal",legend.position=c(0.7,0.2)) +
+  labs(title="Beta diversity(bray)", x="Weeks", y="distance")+ 
+  scale_fill_brewer(palette="Set1") +
+  stat_compare_means(label="p.signif")
+
+ggplot(d3.ATBF.bray.df, aes(x=Ms, y=dist, fill=BE3))+ 
+  geom_boxplot(outlier.shape=NA)+theme_classic() + 
+  theme(legend.direction = "horizontal",legend.position=c(0.7,0.2)) +
+  labs(title="Beta diversity(bray)", x="Weeks", y="distance")+ 
+  scale_fill_brewer(palette="Set1") +
+  stat_compare_means(label="p.signif")
+```
+
+
+```{r}
+range(d3.ATBF.bray.df$dist)
+```
+
+```{r}
+mypcoa <- function(dist, scale=F, method = "bray"){
+    dis <- dist
+    pco <- pcoa(dis)
+   return(pco)
+}
+```
+
+```{r}
+pcoa_bray <- pcoa(IGC.eu.dist[tsALL.phe$DNAID,tsALL.phe$DNAID])
+pcoa_data <- data.frame(pcoa_bray$vectors[,1:2])
+colnames(pcoa_data) <- c("PC1", "PC2")
+eig <- pcoa_bray$value[,1]
+pc1 <- eig[1]/sum(eig)*100
+pc2 <- eig[2]/sum(eig)*100
+pc1 <- paste0("PC1(",round(pc1,2),"%)")
+pc2 <- paste0("PC2(",round(pc2,2),"%)")
+### merge data frame
+rownames(tsALL.phe) <- tsALL.phe$DNAID
+pcoa_data<-merge(pcoa_data, tsALL.phe, by = "row.names")
+
+ggplot(pcoa_data,aes(x=PC1,y=PC2,color=BE3)) + geom_point() + facet_wrap(~WTimes,ncol=4) +
+  coord_fixed() + theme(legend.position = "top") + stat_ellipse(aes(color=BE3)) +
+  xlab(pc1)+ylab(pc2) 
+```
+
+```{r}
+ggplot(pcoa_data,aes(x=PC1,y=PC2,color=BE3)) + geom_point() + facet_wrap(~WTimes,ncol=4) +
+  coord_fixed() + theme(legend.position = "top") + stat_ellipse(aes(color=BE3)) +
+  xlab(pc1)+ylab(pc2) 
+```
+
+
+```{r}
+mgs.prf <- as.matrix(read.table("../../../Result/01.Profile/MGS_V2.profile"))
+ws.DNAID <- as.character(FDNA.NPC.pick3$DNAID)
+bray.dist <- vegdist(t(mgs.prf[,ws.DNAID]), "bray", binary = TRUE)
+rlb.dist <- betadiver(t(mgs.prf[,ws.DNAID]),method="rlb")
+the.dist <- bray.dist
+pcoa_class <- mypcoa(the.dist)
+pcoa_data <- data.frame(pcoa_class$vectors[,c(1:3)])
+colnames(pcoa_data) <- c("PC1", "PC2","PC3")
+eig <- pcoa_class$values[,1]
+pc1 <- eig[1]/sum(eig)*100
+pc2 <- eig[2]/sum(eig)*100
+pc3 <- eig[3]/sum(eig)*100
+
+pc1 <- paste0("PC1(",round(pc1,2),"%)")
+pc2 <- paste0("PC2(",round(pc2,2),"%)")
+pc3 <- paste0("PC3(",round(pc3,2),"%)")
+
+### merge data frame
+#rownames(cc2.phe) <- cc2.phe$DNAID
+pcoa_data2 <-merge(pcoa_data, FDNA.NPC.pick3, by.x = "row.names",by.y="DNAID")
+
+p.rlb <- ggplot(pcoa_data2,aes(x=PC1,y=PC2,color=BE3)) + geom_point() + facet_wrap(~Ms,ncol=4) +
+  coord_fixed() + theme(legend.position = "top") + stat_ellipse(aes(color=BE3)) +
+  xlab(pc1)+ylab(pc2) + scale_color_brewer(palette="Set1")
+p.rlb
+
+```
+

@@ -1,0 +1,173 @@
+---
+title: "Phenotype"
+output:
+  html_notebook:
+    code_fold: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+library(survminer)
+library("survival")
+chaoTheme <- theme(axis.title=element_text(size=16,face="bold"),
+                   text=element_text(size=14,face="bold"))
+
+do.write <- F
+```
+
+
+> Loading
+
+```{r}
+# Load thr1st,patSum,pat3M,Nthr,evaDat,pat3M0,pat3M1
+load("../../Result/Phenotype/both/phenotype.BOTH.Rmd.RData")
+# Load patDNA0,patDNA3
+load("../../Result/Phenotype/both/FecalDNA.BOTH.Rmd.RData")
+#load antibiotic usage info
+atb.usage.csv <- read.csv("../../Result/Phenotype/ATB.usage.info.190425.csv")
+#load patient ID list from Liqin
+NPC.include.list <- read.csv("../../Result/Phenotype/NPC/NPC_62_patients.20200401.csv")
+#Load additional patients info without feces sample collected
+phe.HLA.csv <- read.csv("../../Result/HLA/57_PD1_NPC.2020-4-14.csv")
+datRes2<- patDNA0
+g3Res2 <- patDNA3
+```
+
+```{r}
+g3Res2$BestEvaluation <- factor(g3Res2$BestEvaluation,levels=c("PD","SD","PR"))
+g3Res2 <- g3Res2[which(!is.na(g3Res2$PFS3m)),]
+
+g3Res2$Tumor_Type <- factor(g3Res2$Tumor_Type,levels=c("NSCLC","NPC"))
+g3Res2$PD.Day[which(is.na(g3Res2$PD.Day))] <- 300
+TMB.info <- read.csv("../../Result/WES/57_PD1_NPC.final.xls.csv")
+MUT.info <- read.csv("../../Result/Phenotype/sub.Mutation.info.20181228.csv")
+
+NPC.PID <- as.character(NPC.include.list$Patient)
+NPC.ATB.PID <- as.character(unique((atb.usage.csv%>%filter(PID%in%NPC.PID&ATB.Day<56))$PID))
+```
+
+Fig 0. preview
+```{r}
+phe.all.NPC <- (phe.HLA.csv%>%filter(PID%in%NPC.PID))[,c(1,3:6,8)]
+colnames(phe.all.NPC)[2:3] <- c("Tumor_Type","Treatment")
+levels(phe.all.NPC$Treatment) <- c("Nivolumab","Camrelizumab")
+missing.in.HLA.PID <-  setdiff(NPC.PID,as.character(phe.HLA.csv$PID[which(phe.HLA.csv$Tumor=="NPC")]))
+tmp.2.df <- (g3Res2%>%filter(CTgrp=="baseline"&PID%in%missing.in.HLA.PID))[,colnames(phe.all.NPC)]
+
+phe.all.NPC <- rbind(phe.all.NPC,tmp.2.df)
+stat.phe <- ddply(phe.all.NPC,c("Treatment","PFS3m","Tumor_Type"),summarise,count=length(PID))
+stat.phe <- ddply(stat.phe,c("Treatment","Tumor_Type"),transform,ratio=round(100*count/sum(count),2))
+
+ggplot(stat.phe, aes(x=Treatment,y=ratio,fill=PFS3m)) + geom_bar(stat="identity",position="stack") + 
+  geom_text(aes(label = paste0("n=",count)), position = position_stack(),
+            vjust = 2, hjust = .5, size = 4, colour = 'black') + 
+  geom_text(aes(label = paste0(ratio,"%")), position = position_stack(),
+            vjust = 3.5, hjust = .5, size = 4, colour = 'black') + 
+  scale_fill_brewer(palette="Set1") +
+  facet_grid(.~Tumor_Type,scale="free",space="free") + theme_bw() + ylab("Response ratio")
+```
+
+```{r}
+phe.gut.NPC <- pat3M%>%filter(PID%in%NPC.PID&CTgrp=="baseline")
+stat.npc <- ddply(phe.gut.NPC,c("Treatment","BE3","Tumor_Type"),summarise,count=length(PID))
+stat.npc <- ddply(stat.npc,c("Treatment","Tumor_Type"),transform,ratio=round(100*count/sum(count),2))
+ggplot(stat.npc, aes(x=Treatment,y=ratio,fill=BE3)) + geom_bar(stat="identity",position="stack") + 
+  geom_text(aes(label = paste0("n=",count)), position = position_stack(),
+            vjust = 2, hjust = .5, size = 4, colour = 'black') + 
+  geom_text(aes(label = paste0(ratio,"%")), position = position_stack(),
+            vjust = 3.5, hjust = .5, size = 4, colour = 'black') + 
+  scale_fill_brewer(palette="Set1") +
+  facet_grid(.~Tumor_Type,scale="free",space="free") + theme_bw() + ylab("Response ratio")
+
+```
+
+```{r}
+phe.base.gut.NPC <- g3Res2%>%filter(CTgrp=="baseline"&PID%in%NPC.PID)
+missing.META.atall.PID <-  setdiff(NPC.PID,as.character(patDNA0$PID[which(patDNA0$Tumor=="NPC")]))
+missing.META.atbase.PID <-  setdiff(NPC.PID,as.character(phe.base.gut.NPC$PID[which(phe.base.gut.NPC$Tumor=="NPC")]))
+
+phe.base.gut.NPC$ATBR <- ifelse(phe.base.gut.NPC$PID%in%atb.risk.PID,T,F)
+stat.g3 <- ddply(phe.base.gut.NPC,c("Treatment","BE3","Tumor_Type"),summarise,count=length(PID))
+stat.g3 <- ddply(stat.g3,c("Treatment","Tumor_Type"),transform,ratio=round(100*count/sum(count),2))
+ggplot(stat.g3, aes(x=Treatment,y=ratio,fill=BE3)) + geom_bar(stat="identity",position="stack") + 
+  geom_text(aes(label = paste0("n=",count)), position = position_stack(),
+            vjust = 2, hjust = .5, size = 4, colour = 'black') + 
+  geom_text(aes(label = paste0(ratio,"%")), position = position_stack(),
+            vjust = 3.5, hjust = .5, size = 4, colour = 'black') + 
+  scale_fill_brewer(palette="Set1") +
+  facet_grid(.~Tumor_Type,scale="free",space="free") + theme_bw() + ylab("Response ratio")
+```
+
+# PFS of ATB
+```{r}
+#table(ATB.mdat$ATB02)
+#length(unique(ATB.mdat$PID[which(!is.na(ATB.mdat$ATB))]))
+```
+
+```{r}
+ATB.mdat <- (phe.all.NPC%>%filter(Tumor_Type=="NPC"))
+ATB.mdat$ATB02 <- ifelse(ATB.mdat$PID%in%NPC.ATB.PID,T,F)
+ATB.fit <- survfit(Surv(PD.Day)~ATB02,data=ATB.mdat)
+ATB.diff <- survdiff(Surv(PD.Day)~ATB02,data=ATB.mdat,rho=1)
+ATB.diff
+ggsurvplot(ATB.fit, data = ATB.mdat,xlim=c(0,112),break.time.by=14,surv.scale="percent",
+           palette=brewer.pal(n=3,"Set1")) + xlab("Days after treatment")
+
+if(do.write){
+  ggsave("../../Result/Phenotype/NPC/NPC.ATB.PFS.survplot.pdf",width=4,height=3)
+}
+```
+
+
+```{r}
+
+ATB.mdat.3 <- merge((phe.all.NPC%>%filter(Tumor_Type=="NPC")),atb.usage.csv[,-2],by="PID")
+#ATB.mdat.3 <- ATB.mdat.3%>%filter(ATB.mdat.3$ATB!="baseline")
+ATB3.fit <- survfit(Surv(PD.Day)~ATB,data=ATB.mdat.3)
+#ATB3.diff <- survdiff(Surv(PD.Day)~ATB,data=ATB3.fit,rho=1)
+ATB.diff
+ggsurvplot(ATB3.fit, data = ATB.mdat.3,xlim=c(0,112),break.time.by=14,surv.scale="percent",
+           palette=brewer.pal(n=5,"Set1")) + xlab("Days after treatment")
+
+if(do.write){
+  ggsave("../../Result/Phenotype/NPC/NPC.ATB.PFS.survplot.pdf",width=4,height=3)
+}
+```
+
+Export:
+```{r}
+if(do.write){
+  save(phe.all.NPC,phe.gut.NPC,phe.base.gut.NPC,NPC.PID,NPC.ATB.PID,
+     file="../../Result/Phenotype/NPC/NPC62.phe.RData")
+  tools::md5sum("../../Result/Phenotype/NPC/NPC62.phe.RData")
+}
+
+```
+
+igA phenotype
+```{r}
+aIgA <- read.csv("../../Result/Phenotype/IgA.Eva.data.csv",row.names = 1)
+```
+
+
+
+
+```{r}
+ggplot(aIgA%>%filter(Tumor_Type=="NPC"&Type!="Evaluation"&PID%in%NPC.PID),aes(x=Day,y=IgA)) + geom_point(aes(color=BestEvaluation)) +
+  geom_line(aes(group=PID,color=BestEvaluation),alpha=.5) +
+  #scale_x_continuous(limits=c(-7,200)) +
+  facet_grid(Type~Medicine,scales="free_y") + theme_bw() + chaoTheme
+
+ggplot(aIgA%>%filter(PID%in%NPC.PID&Tumor_Type=="NPC"&Type!="Evaluation"&!is.na(BestEvaluation)&CTgrp=="baseline"),aes(x=BestEvaluation,y=IgA)) + 
+  geom_boxplot(aes(fill=BestEvaluation))+ facet_grid(Type~Medicine,scales="free_y") +
+  stat_compare_means()
+```
+
+
+#Fin.

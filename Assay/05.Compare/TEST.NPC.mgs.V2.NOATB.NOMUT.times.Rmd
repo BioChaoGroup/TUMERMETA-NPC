@@ -1,0 +1,374 @@
+---
+title: "Compare significance"
+output:
+  html_notebook:
+    code_fold: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(RColorBrewer)
+library(pheatmap)
+library("survminer")
+library(parallel)
+source("TEST.functions.R")
+
+# Global variance for write or not
+do.write <- F
+# Outpu dir
+outdir <- "../../Result/TEST/timeSeries/"
+if(do.write&!dir.exists(outdir)){dir.create(outdir)}
+# tag
+tag <- "NPC.ATBF.times"
+```
+
+# 1. Load data
+
+> 1). Phenotype info
+>
+> 2). 833 samples Speices profile table (MetaPhlAn2)
+>
+>   1. Only baseline
+>
+>   2. Only treatment 1 month
+>
+>   3. Only treatment 2 month
+>
+>   4. Only treatment 3 month
+
+By default, the script will only print significant records without writing all results.
+
+> Reading V2 profile and phenotype
+
+```{r, warning=FALSE}
+# Load thr1st,patSum,pat3M,Nthr,evaDat,pat3M0,pat3M1
+load("../../Result/Phenotype/NPC/phenotype.NPC.Rmd.RData")
+# Load patDNA0,patDNA3
+load("../../Result/Phenotype/NPC/FecalDNA.Rmd.RData")
+#tsALL.phe
+load("../../Result/TEST/timeSeries/tsALL.phe.RData")
+#TMB
+TMB.info <- read.csv("../../Result/Phenotype/curated.HLA-E.info.csv")
+
+#FDNA.NS,FDNA.NPC.pick2,FDNA.NPC.pick3
+load("../../Result/TimeSeries/NPC/FDNA.NPC.picks.RData")
+FDNA.NPC.pick2.ATBF <- FDNA.NPC.pick2%>%filter(ATB02==F)
+FDNA.NPC.pick3.ATBF <- FDNA.NPC.pick3%>%filter(ATB02==F)
+sp.prf <- read.table("../../Result/01.Profile/MGS_V2.profile")
+sp.min.abun <- sort(unique(unlist(sp.prf)))[2]
+mgs.V2.anno <- read.table("../../Result/01.Profile/00.IGC.MGS.annotation",sep="\t",header=T)
+mgs.V2.anno$mgs.V2 <- sub(":",".",mgs.V2.anno$X)
+mgs.V2.anno2 <- mgs.V2.anno[,c(8,2,3)]
+mgs.V2.LPS.anno <- read.csv("../../Result/01.Profile/MGS.1507.annoatation.LPS.csv")
+mgs.V2.LPS.anno$MGS <- sub(":",".",mgs.V2.LPS.anno$MGS)
+rownames(mgs.V2.LPS.anno) <- mgs.V2.LPS.anno$MGS
+```
+
+# Curation
+- Remove subjects with antibiotics usage during baseline (-2month before treatment) to 2nd month after treatment.
+
+**test randomly pick of baseline**
+```{r}
+all.base.phe <- FDNA.NS%>%filter(Ms=="M0"&ATB02==F)
+
+randPick <- function(d){
+  i <- sample(1:nrow(d),1); return(d[i,c("PID","DNAID")])
+}
+
+set.rand.time = 100
+
+#for wilcox, the prefix is "rand.base.wilcox"
+#for anova,  the prefix is "rand.base.anova"
+if(file.exists(paste0("../../Result/TEST/NPC/rand.base.anova.",set.rand.time,".RData"))){
+  load(paste0("../../Result/TEST/NPC/rand.base.anova.",set.rand.time,".RData"))
+}else{
+  #
+  rand.pick.base.phe <- NULL
+  for(i in 1:set.rand.time){
+    set.seed(i)
+    rand.pick.base.phe[[i]] <- ddply(all.base.phe,"PID",randPick)
+  }
+  #
+  cl <- makeCluster(5)
+  clusterExport(cl,c("aovFun","all.base.phe","rand.pick.base.phe","sp.prf","mgs.V2.anno2"))
+  rand.pick.base.test <- parSapply(cl,1:set.rand.time,FUN=function(x){
+    library(dplyr);library(plyr);
+    aovFun(sp.prf[,as.character(rand.pick.base.phe[[x]]$DNAID)],
+      all.base.phe[which(all.base.phe$DNAID%in%rand.pick.base.phe[[x]]$DNAID),],
+      "DNAID","BE3",NULL,ex.0=F)
+  },simplify = F)
+  stopCluster(cl)
+  save(rand.pick.base.phe, rand.pick.base.test,
+       file=paste0("../../Result/TEST/NPC/rand.base.anova.",set.rand.time,".RData"))
+}
+# for wilcox use "p.value", anova use "ori.pval"
+p.val.stat <- sapply(rand.pick.base.test, "[[", "ori.pval")
+occ.stat <- sapply(rand.pick.base.test, "[[", "Occ.")
+enrich.stat <- sapply(rand.pick.base.test, "[[", "Enrich")
+p.val.stat.df <- data.frame(
+  mgs.V2=rand.pick.base.test[[1]]$mgs.V2,
+  mean.pval=rowMeans(p.val.stat),
+  mean.occ=rowMeans(occ.stat),
+  enrich = unlist(apply(enrich.stat,1,function(x) {
+    tb <- rev(sort(table(x)))[1]
+    if(is.na(tb)){return(NA)}else{return(names(tb))}})),
+  sign.freq=apply(p.val.stat,1,function(x) length(which(x<0.05)))
+)
+
+
+adj.pval.stat <- sapply(rand.pick.base.test, "[[", "adj.pval")
+adj.pval.stat.df <- data.frame(
+  mgs.V2=rand.pick.base.test[[1]]$mgs.V2,
+  mean.pval=rowMeans(adj.pval.stat),
+  sign.freq=apply(adj.pval.stat,1,function(x) length(which(x<0.05)))
+)
+
+sign100.ori.df <- p.val.stat.df%>%filter(sign.freq>=75&mean.pval<0.05)
+sign100.adj.df <- adj.pval.stat.df%>%filter(sign.freq>=75&mean.pval<0.05)
+
+mgs.diff <- c(
+  setdiff(sign100.ori.df$mgs.V2,sign100.adj.df$mgs.V2),
+  setdiff(sign100.adj.df$mgs.V2,sign100.ori.df$mgs.V2)
+)
+(merge(p.val.stat.df,adj.pval.stat.df,by="mgs.V2",all=T))%>%filter(mgs.V2%in%mgs.diff)
+#mgs.common <- intersect(sign100.ori.df$mgs.V2,sign100.adj.df$mgs.V2)
+mgs.common <- sign100.ori.df$mgs.V2
+export.sign.df <- merge(p.val.stat.df%>%filter(mgs.V2%in%mgs.common),mgs.V2.LPS.anno,by.x="mgs.V2",by.y="MGS")
+#
+p.val.stat.df$enrich<-factor(p.val.stat.df$enrich,levels=c("PD","SD","PR"))
+prp <- ggplot(p.val.stat.df%>%filter(sign.freq>0),aes(y=mean.pval,x=sign.freq,size=mean.occ)) + 
+  geom_hline(yintercept = 0.05,linetype=2,color="grey50") + 
+  geom_vline(xintercept = 75,linetype=2,color="grey50") + 
+  geom_point(alpha=.3,aes(color=enrich),shape=16) + 
+  scale_color_brewer(palette = "Set1",na.value = "grey50") + theme_bw() +
+  scale_y_log10(breaks=c(0.001,0.01,0.05,0.1,1)) + 
+  annotation_logticks(side='l') +
+  labs(y="p value",x="frequency of singinicance",size="Occurrence") +
+  scale_x_continuous(breaks=seq(0,100,20))
+prp
+if(do.write){
+  ggsave(prp,width = 4,height=6,
+         file = "../../Result/TEST/NPC/rand.100.anova.pval.freq.dot.pdf")
+  write.csv(export.sign.df,
+            file="../../Result/TEST/NPC/rand.100.anova.sign.mgs.df.csv")
+}
+```
+
+test each phase
+
+Use anova:
+```{r}
+if(file.exists("../../Result/TEST/NPC/sum.Ws.BE3.anova.test.RData")){
+  load("../../Result/TEST/NPC/sum.Ws.BE3.anova.test.RData")
+}else{
+  FDNA.NPC.pick2.ATBF$Ws <- droplevels(FDNA.NPC.pick2.ATBF$Ws)
+  sum.Ws.BE3.test <- NULL
+  for(i in levels(FDNA.NPC.pick2.ATBF$Ws)){
+    tsi.phe <- FDNA.NPC.pick2.ATBF%>%filter(Ws==i)
+    tsi.phe <- tsi.phe[order(interaction(tsi.phe$Ws,tsi.phe$BE3)),]
+    rownames(tsi.phe) <- tsi.phe$DNAID
+    tsi.prf <- sp.prf[,as.character(tsi.phe$DNAID)]
+    tsi.BE3.in0.w <- aovFun(tsi.prf,tsi.phe,"DNAID","BE3",NULL,ex.0=F)
+    sum.Ws.BE3.test[[i]] <- tsi.BE3.in0.w
+    ggplot(tsi.BE3.in0.w,aes(x=FDR,fill=Enrich)) + geom_histogram(position="stack") + xlim(c(0,1))
+    ggsave(paste0("../../Result/TEST/NPC/Ws.",i,".FDR.hist.pdf"))
+    ggplot(tsi.BE3.in0.w,aes(x=ori.pval,fill=Enrich)) + geom_histogram(position="stack") + xlim(c(0,1))
+    ggsave(paste0("../../Result/TEST/NPC/Ws.",i,".ori.pval.hist.pdf"))
+    ggplot(tsi.BE3.in0.w,aes(x=adj.pval,fill=Enrich)) + geom_histogram(position="stack") + xlim(c(0,1))
+    ggsave(paste0("../../Result/TEST/NPC/Ws.",i,".adj.pval.hist.pdf"))
+  }
+  save(sum.Ws.BE3.test,file="../../Result/TEST/NPC/sum.Ws.BE3.anova.test.RData")
+}
+
+if(file.exists("../../Result/TEST/NPC/sum.Ms.BE3.anova.test.RData")){
+  load("../../Result/TEST/NPC/sum.Ms.BE3.anova.test.RData")
+}else{
+  sum.Ms.BE3.test <- NULL
+  for(i in levels(FDNA.NPC.pick3.ATBF$Ms)){
+    tsi.phe <- FDNA.NPC.pick3.ATBF%>%filter(Ms==i)
+    tsi.phe <- tsi.phe[order(interaction(tsi.phe$Ms,tsi.phe$BE3)),]
+    rownames(tsi.phe) <- tsi.phe$DNAID
+    tsi.prf <- sp.prf[,as.character(tsi.phe$DNAID)]
+    tsi.BE3.in0.w <- aovFun(tsi.prf,tsi.phe,"DNAID","BE3",NULL,ex.0=F)
+    sum.Ms.BE3.test[[i]] <- tsi.BE3.in0.w
+    ggplot(tsi.BE3.in0.w,aes(x=FDR,fill=Enrich)) + geom_histogram(position="stack") + xlim(c(0,1))
+    ggsave(paste0("../../Result/TEST/NPC/Ms.",i,".FDR.hist.pdf"))
+    ggplot(tsi.BE3.in0.w,aes(x=ori.pval,fill=Enrich)) + geom_histogram(position="stack") + xlim(c(0,1))
+    ggsave(paste0("../../Result/TEST/NPC/Ms.",i,".ori.pval.hist.pdf"))
+    ggplot(tsi.BE3.in0.w,aes(x=adj.pval,fill=Enrich)) + geom_histogram(position="stack") + xlim(c(0,1))
+    ggsave(paste0("../../Result/TEST/NPC/Ms.",i,".adj.pval.hist.pdf"))
+  }
+  save(sum.Ms.BE3.test,file="../../Result/TEST/NPC/sum.Ms.BE3.anova.test.RData")
+}
+```
+
+
+**check significant MGSs**
+```{r}
+sum.Ms.wilcox.df <- rbind(
+  cbind(Ms="M0",sum.Ms.BE3.test$M0),
+  cbind(Ms="W1",sum.Ms.BE3.test$W1),
+  cbind(Ms="M1",sum.Ms.BE3.test$M1),
+  cbind(Ms="M2",sum.Ms.BE3.test$M2),
+  cbind(Ms="M3",sum.Ms.BE3.test$M3),
+  cbind(Ms="M4",sum.Ms.BE3.test$M4)
+)
+
+#if anova
+sum.Ms.wilcox.df$p.value<-sum.Ms.wilcox.df$ori.pval
+#
+sum.Ms.wilcox.matrix <- dcast(sum.Ms.wilcox.df%>%filter(Occ.>0.0),mgs.V2~Ms,value.var = "p.value")
+#
+select.mgs <- (export.sign.df%>%filter(mgs.V2%in%mgs.common&mean.occ>0.0))$mgs.V2
+sum.Ms.wilcox.matrix <- dcast(sum.Ms.wilcox.df%>%filter(mgs.V2%in%select.mgs),mgs.V2~Ms,value.var = "p.value")
+#
+rownames(sum.Ms.wilcox.matrix) <- sum.Ms.wilcox.matrix[,1]
+sum.Ms.wilcox.matrix <- sum.Ms.wilcox.matrix[,-1]
+
+sum.Ms.sign.matrix <- sum.Ms.wilcox.matrix[which(sum.Ms.wilcox.matrix[,1]<0.05),]
+
+sum.Ms.sign.matrix <- apply(sum.Ms.sign.matrix,1:2,function(x) ifelse(is.na(x),1,x))
+
+phm0 <- pheatmap(sum.Ms.sign.matrix,cluster_rows = T,cluster_cols = F,
+         color=colorRampPalette(brewer.pal(n = 11, name ="RdGy"))(11),
+         breaks=rev(c(1,0.7,0.5,0.2,0.1,0.05,0.01,0.005,0.001,0.0005,0))
+)
+
+signifFun <- function(d){
+  pcheck <- d$p.value[d$Ms=="M0"] <0.05 & (d$p.value[d$Ms=="M2"] <0.05|d$p.value[d$Ms=="M3"] <0.05)
+  echeck <- length(unique(d$Enrich[d$Ms%in%c("M0","M2","M3")])) == 1 && !is.na(unique(d$Enrich[d$Ms%in%c("M0","M2","M3")]))
+  if(pcheck & echeck){
+    return(d[1,])
+  }
+}
+
+```
+
+
+```{r}
+ggplot(sum.Ms.wilcox.df%>%filter(Pct>20&Occ.>0.2),
+       aes(x=ori.pval,color=Ms)) + geom_density()
+```
+
+
+**median value**
+```{r}
+deficientFun <- function(d,p){
+  ind <- which(d[p+1:3]==min(d[p+1:3]))
+  if(length(ind)==1){
+    d$deficient <- sub("median.","",colnames(d)[p+ind])
+  }else{
+    d$deficient <- NA
+  }
+  return(d)
+}
+#p=9 for 'anova', p=10 for 'wilcox'
+sum.Ms.wilcox.df <- ddply(sum.Ms.wilcox.df,c("Ms","mgs.V2"),deficientFun,9)
+PD.Ms.median.matrix <- dcast(sum.Ms.wilcox.df,mgs.V2~Ms,value.var = "median.PD")
+SD.Ms.median.matrix <- dcast(sum.Ms.wilcox.df,mgs.V2~Ms,value.var = "median.SD")
+PR.Ms.median.matrix <- dcast(sum.Ms.wilcox.df,mgs.V2~Ms,value.var = "median.PR")
+#
+sum.Ms.median.matrix <- cbind(PD.Ms.median.matrix,SD.Ms.median.matrix[,-1],PR.Ms.median.matrix[,-1])
+colnames(sum.Ms.median.matrix)[2:19] <- paste0(rep(c("PD","SD","PR"),each=6),colnames(sum.Ms.median.matrix)[2:19])
+rownames(sum.Ms.median.matrix) <- sum.Ms.median.matrix[,1]
+sum.Ms.median.matrix <- sum.Ms.median.matrix[,-1]
+
+sum.Ms.median.matrix <- apply(sum.Ms.median.matrix,1:2,function(x) ifelse(is.na(x),0,x))
+sum.Ms.median.matrix <- apply(sum.Ms.median.matrix,1:2,function(x) ifelse(x==0,-10,log10(x)))
+#
+PD.Ms.signif.matrix <- dcast(sum.Ms.wilcox.df%>%filter(Enrich=="PD"),
+                             mgs.V2~Ms,value.var = "p.value")
+SD.Ms.signif.matrix <- dcast(sum.Ms.wilcox.df%>%filter(Enrich=="SD"),
+                             mgs.V2~Ms,value.var = "p.value")
+PR.Ms.signif.matrix <- dcast(sum.Ms.wilcox.df%>%filter(Enrich=="PR"),
+                             mgs.V2~Ms,value.var = "p.value")
+#
+PD.Ms.deficient.matrix <- dcast(sum.Ms.wilcox.df%>%filter(deficient=="PD"&p.value<0.05),
+                             mgs.V2~Ms,value.var = "deficient")
+SD.Ms.deficient.matrix <- dcast(sum.Ms.wilcox.df%>%filter(deficient=="SD"&p.value<0.05),
+                             mgs.V2~Ms,value.var = "deficient")
+PR.Ms.deficient.matrix <- dcast(sum.Ms.wilcox.df%>%filter(deficient=="PR"&p.value<0.05),
+                             mgs.V2~Ms,value.var = "deficient")
+
+#
+sum.Ms.signif.matrix <- matrix(NA,ncol=ncol(sum.Ms.median.matrix),
+                               nrow=nrow(sum.Ms.median.matrix),
+                               dimnames=dimnames(sum.Ms.median.matrix))
+#
+sum.Ms.signif.matrix[PD.Ms.deficient.matrix$mgs.V2,  1:6] <- ifelse(PD.Ms.deficient.matrix[,-1]=="PD","-")
+sum.Ms.signif.matrix[SD.Ms.deficient.matrix$mgs.V2, 7:12] <- ifelse(SD.Ms.deficient.matrix[,-1]=="SD","-")
+sum.Ms.signif.matrix[PR.Ms.deficient.matrix$mgs.V2,13:18] <- ifelse(PR.Ms.deficient.matrix[,-1]=="PR","-")
+#
+sum.Ms.signif.matrix[PD.Ms.signif.matrix$mgs.V2,  1:6] <- ifelse(
+  PD.Ms.signif.matrix[,-1]<0.05,"*",sum.Ms.signif.matrix[PD.Ms.signif.matrix$mgs.V2,  1:6])
+sum.Ms.signif.matrix[SD.Ms.signif.matrix$mgs.V2, 7:12] <- ifelse(
+  SD.Ms.signif.matrix[,-1]<0.05,"*",sum.Ms.signif.matrix[SD.Ms.signif.matrix$mgs.V2, 7:12])
+sum.Ms.signif.matrix[PR.Ms.signif.matrix$mgs.V2,13:18] <- ifelse(
+  PR.Ms.signif.matrix[,-1]<0.05,"*",sum.Ms.signif.matrix[PR.Ms.signif.matrix$mgs.V2,13:18])
+
+#
+sum.Ms.signif.matrix <- apply(sum.Ms.signif.matrix,1:2,function(x) ifelse(is.na(x),"",x))
+
+#
+phMd <- pheatmap(sum.Ms.median.matrix[rownames(sum.Ms.sign.matrix),],
+         cluster_rows = T,cluster_cols = F,
+         color=c("#CCCCCC",colorRampPalette(brewer.pal(n = 11, name ="RdYlGn"))(11)),
+         gaps_col = c(6,12),
+         display_numbers = sum.Ms.signif.matrix[rownames(sum.Ms.sign.matrix),]
+)
+
+phm.hrow.label <- data.frame(hclust=cutree(phMd$tree_row,k=4))
+phm.hrow.label$hclust <- as.factor(phm.hrow.label$hclust)
+
+phm.row.order <- phMd$tree_row$labels[phMd$tree_row$order]
+#supp the FDR
+sum.Ms.BE3.test$M0$FDR <- p.adjust(sum.Ms.BE3.test$M0$ori.pval,method="BH")
+sum.sign.anno <- merge(sum.Ms.BE3.test$M0%>%filter(mgs.V2%in%phm.row.order),
+                       mgs.V2.LPS.anno,by.x="mgs.V2",by.y="MGS")
+rownames(sum.sign.anno) <- sum.sign.anno$mgs.V2
+sum.sign.anno <- sum.sign.anno[phm.row.order,]
+
+if(do.write){
+  write.csv(sum.sign.anno,file="../../Result/TEST/NPC/mgs.anova.sum.ms.sgin.anno.csv")
+}
+```
+
+**show enriched**
+```{r}
+pick.mgs <- sum.Ms.wilcox.df%>%filter(Ms=="M0"&mgs.V2%in%phm.row.order&Pct>=5)
+pick.mgs.PD <- pick.mgs%>%filter(Enrich=="PD")
+order.mgs.PD <- reorder(pick.mgs.PD$mgs.V2,pick.mgs.PD$median.PD,mean)
+pick.mgs.SD <- pick.mgs%>%filter(Enrich=="SD")
+order.mgs.SD <- reorder(pick.mgs.SD$mgs.V2,pick.mgs.SD$median.SD,mean)
+pick.mgs.PR <- pick.mgs%>%filter(Enrich=="PR")
+order.mgs.PR <- reorder(pick.mgs.PR$mgs.V2,pick.mgs.PR$median.PR,mean)
+
+visual.mgs <- c(rev(levels(order.mgs.PR)),rev(levels(order.mgs.SD)),rev(levels(order.mgs.PD)))
+visual.gap <- cumsum(c(length(levels(order.mgs.PR)),length(levels(order.mgs.SD)),length(levels(order.mgs.PD))))
+phMdv <- pheatmap(sum.Ms.median.matrix[visual.mgs,],
+         cluster_rows = F,cluster_cols = F,
+         color=c("#CCCCCC",colorRampPalette(brewer.pal(n = 11, name ="RdYlGn"))(11)),
+         gaps_col = c(6,12),gaps_row=visual.gap,
+         display_numbers = sum.Ms.signif.matrix[visual.mgs,]
+)
+phMdv
+if(do.write){
+  ggsave(phMdv,width=8,height=3,
+       filename="../../Result/TEST/NPC/mgs.anova.Ms.pheatmap.pdf")
+}
+```
+
+**stat of HSDturkey**
+```{r}
+pick.HSD.df <- melt(pick.mgs,id.vars = "mgs.V2",measure.vars = c("SD.PD","PR.PD","PR.SD"),variable.name = "comparison",value.name = "p.val" )
+ggplot(pick.HSD.df,aes(x=p.val,fill=comparison)) + geom_histogram(position="dodge") + 
+  geom_vline(xintercept = 0.05,linetype=2) + theme_bw()
+if(do.write){
+  ggsave(width=8,height=3,
+  filename = "../../Result/TEST/NPC/mgs.anova.HSDturkey.pval.pdf")
+}
+```

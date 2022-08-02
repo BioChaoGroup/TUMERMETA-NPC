@@ -1,0 +1,203 @@
+---
+title: "Time-series view"
+output:
+  html_notebook:
+    code_fold: hide
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(echo = TRUE)
+library(ggplot2)
+theme_set(theme_bw())
+library(plyr)
+library(reshape2)
+library(ggpubr)
+library(ape)
+library(dplyr)
+library(reshape2)
+library(pheatmap)
+#
+source("../common.R")
+do.write <- F
+OTDIR <- "../../Result/TimeSeries/NPC/"
+if(!dir.exists(OTDIR)){dir.create(OTDIR)}
+```
+
+#import data
+Firstly the table and profile should be imported into phlyseq.
+```{r}
+#Load phe.all.NPC,phe.gut.NPC,phe.base.gut.NPC,NPC.PID,NPC.ATB.PID
+load(md5("../../Result/Phenotype/NPC/NPC62.phe.RData","8e0c62576fff1b421f1c197cb6368957" ))
+#obatin patDNA0,patDNA3,patDNAA:
+load("../../Result/Phenotype/BOTH/FecalDNA.Rmd.RData")
+treat.info <- read.csv("../../Result/Phenotype/sublist.Therapy.info.20171201.csv")
+evaluation.info <- read.csv("../../Result/Phenotype/sub.Evaluation.info.20181108.csv")
+enterotype.info <- read.table("../../Result/Enterotype/2ch.to.pred.enterotype.tsv")
+
+```
+
+#Curation
+```{r}
+treat.info.df <- treat.info%>%filter(PID%in%NPC.PID)
+treat.info.df$Date <- as.Date(treat.info.df$Date,"%Y/%m/%d")
+treat.info.df <- ddply(treat.info.df,c("PID","Medicine"),transform,tDay=Date-Date[which(Times==1)])
+ggplot(treat.info.df%>%filter(Medicine!="Ipilimumab"),aes(x=Times,y=tDay,color=Medicine)) + 
+  geom_point() +  scale_y_continuous(breaks=seq(0,360,30))
+FDNA_A <- merge(patDNAA%>%filter(PID%in%NPC.PID),enterotype.info,by="DNAID")
+
+FDNA_A.phase <- ddply(FDNA_A,c("PID","Treatment"),phaseCheckFun,treat.info.df)
+treat.phase <- ddply(FDNA_A,c("PID","Treatment"),phaseCheckFun,treat.info.df,"treat")
+
+
+FDNA_A.phase2 <- merge(FDNA_A.phase[,c("DNAID","Times","TTimes","WTimes","during","duringDetail")],FDNA_A,by="DNAID")
+```
+
+
+```{r,fig.width=4,fig.height=1.5}
+FDNA.NS <- FDNA_A.phase2%>%filter(PID%in%NPC.PID&Day%in%seq(-14,126))
+FDNA.NS$Ws <- factor(
+  paste0("W",FDNA.NS$WTimes*2),levels=paste0("W",c(0,1,seq(2,18,2))))
+FDNA.NS$Ws[which(FDNA.NS$WTimes==1&FDNA.NS$Day<7)] <- "W1"
+#manully set first P114 (Day 1) to W0
+abnIND <- which(FDNA.NS$Ws=="W1"&FDNA.NS$CTgrp=="baseline")
+FDNA.NS$Ws[abnIND] <- "W0"
+FDNA.NS$WTimes[abnIND] <- 0
+FDNA.NS$during[abnIND] <- "tail"
+num.NPC <- ddply(FDNA.NS,c("WTimes","Ws","during"),summarise,count=length(DNAID))
+num.NPC$Day <-(num.NPC$WTimes*14 - 12*as.numeric(num.NPC$during=="head"))
+#num.NPC$X <- as.factor((num.NPC$WTimes+1)%%2)
+#FDNA.NS$X <- as.factor((FDNA.NS$WTimes+1)%%2)
+p0<- ggplot(FDNA.NS,aes(x=during,y=Day,color=Ws)) + 
+  geom_dotplot(binaxis = "y", stackdir = "center",binwidth = .5) + ylab("Weeks") +
+  geom_text(data=num.NPC,aes(label=count),nudge_y=4,nudge_x=.2) +
+  scale_x_discrete(labels=c("After last\ntreatment","Before next\ntreatment")) +
+  scale_y_continuous(breaks=seq(0,126,14),labels=seq(0,18,2)) + 
+  coord_flip() + ggtitle("Fecal sample collected in each phase")
+p0
+if(do.write){
+  ggsave(p0,file=paste0(OTDIR,"FDNA.allPoints.dotplot.pdf"),width=8,height=3)
+}
+```
+
+**numbers**
+```{r}
+nrow(FDNA.NS%>%filter(WTimes<=8&ATB02==F))
+```
+
+
+```{r}
+RepresentPicking <- function(d){
+  d <- d[rev(order(d$Day))[1],]
+  return(d)
+}
+
+FDNA.NS.pick1 <- ddply(FDNA.NS,c("PID","WTimes","Ws"),RepresentPicking)
+FDNA.NS.pick2 <- ddply(FDNA.NS,c("PID","WTimes","during"),RepresentPicking)
+
+num.pick1 <- ddply(FDNA.NS.pick1,c("during","WTimes","Ws"),summarise,count=length(DNAID))
+num.pick1$Day <- (num.pick1$WTimes*14 - 12*as.numeric(num.pick1$during=="head"))
+#num.pick1$X <- as.factor((num.pick1$WTimes+1)%%2)
+p1 <- ggplot(FDNA.NS.pick1,aes(x=during,y=Day,color=Ws)) + 
+  geom_dotplot(binaxis = "y", stackdir = "center",binwidth = .5) + ylab("Weeks") +
+  geom_text(data=num.pick1,aes(label=count),nudge_y=3,nudge_x=.1) +
+  scale_x_discrete(labels=c("After last\ntreatment","Before next\ntreatment")) +
+  scale_y_continuous(breaks=seq(0,126,14),labels=seq(0,18,2)) + 
+  coord_flip() + ggtitle("Fecal sample with 'one per patient' in 1st & each 2 weeks")
+p1
+
+num.pick2 <- ddply(FDNA.NS.pick2,c("during","WTimes","Ws"),summarise,count=length(DNAID))
+num.pick2$Day <- (num.pick2$WTimes*14 - 12*as.numeric(num.pick2$during=="head"))
+p2 <- ggplot(FDNA.NS.pick2,aes(x=during,y=Day,color=Ws)) + 
+  geom_dotplot(binaxis = "y", stackdir = "center",binwidth = .5) + ylab("Weeks") +
+  geom_text(data=num.pick2,aes(label=count),nudge_y=3,nudge_x=.1) +
+  scale_x_discrete(labels=c("After last\ntreatment","Before next\ntreatment")) +
+  scale_y_continuous(breaks=seq(0,126,14),labels=seq(0,18,2)) + 
+  coord_flip() + ggtitle("Fecal sample with 'one per patient' in each head/tail stage")
+p2
+
+
+if(do.write){
+
+  ggsave(p1,file=paste0(OTDIR,"FDNA.represent.in.Ws.dotplot.pdf"),width=8,height=3)
+  ggsave(p2,file=paste0(OTDIR,"FDNA.represent.in.Ws+during.dotplot.pdf"),width=8,height=3)
+
+}
+```
+
+**numbers**
+```{r}
+nrow(FDNA.NS.pick2%>%filter(WTimes<=8&ATB02==F))
+#nrow(FDNA.NS.pick3%>%filter(WTimes<=8&ATB02==F))
+
+```
+
+```{r}
+FDNA.NS$Ms <- ifelse(FDNA.NS$Ws=="W1","W1",paste0("M",ceiling(as.numeric(substr(FDNA.NS$Ws,2,3))/4)))
+FDNA.NS.pick3 <- ddply(FDNA.NS,c("PID","Ms"),RepresentPicking)
+num.pick3 <- ddply(FDNA.NS.pick3,c("during","Ms"),summarise,count=length(DNAID))
+num.pick3$Day <- ifelse(grepl("W",num.pick3$Ms),7,ceiling(as.numeric(substr(num.pick3$Ms,2,3))*28))
+#num.pick1$X <- as.factor((num.pick1$WTimes+1)%%2)
+p3 <- ggplot(FDNA.NS.pick3,aes(x=during,y=Day,color=Ms)) + 
+  geom_dotplot(binaxis = "y", stackdir = "center",binwidth = .5) + ylab("Month") +
+  geom_text(data=num.pick3,aes(label=count),nudge_y=3,nudge_x=.1) +
+  scale_x_discrete(labels=c("After last\ntreatment","Before next\ntreatment")) +
+  scale_y_continuous(breaks=seq(0,140,28),labels=seq(0,5)) + 
+  coord_flip() + ggtitle("Fecal sample 'one per patient' in each month")
+p3
+if(do.write){
+  ggsave(p3,file=paste0(OTDIR,"FDNA.represent.in.Ms.dotplot.pdf"),width=8,height=3)
+}
+```
+
+**mark represent DNA IDs**
+```{r}
+select.FDNA.NS.pick2.ID <- (FDNA.NS.pick2%>%filter(Ws=="W1"|(Ws!="W18"&during=="tail")))$DNAID
+select.FDNA.NS.pick3.ID <- (FDNA.NS.pick3%>%filter(Ms=="W1"|(Ms!="M5"&during=="tail")))$DNAID
+
+FDNA.NS.select <- FDNA.NS.pick2%>%filter(DNAID%in%select.FDNA.NS.pick2.ID)
+FDNA.NS.select$mark <- ifelse(FDNA.NS.select$DNAID%in%select.FDNA.NS.pick3.ID,"ZM","W")
+FDNA.NS.select$mark[which(FDNA.NS.select$Ws=="W1")] <- "W"
+num.picks <- ddply(FDNA.NS.select,c("mark","WTimes","Ws"),summarise,count=length(DNAID))
+num.picks$Day <- (num.picks$WTimes*14 - 12*as.numeric(num.picks$Ws=="W1"))
+
+ps <- ggplot(FDNA.NS.select,aes(x=mark,y=Day,color=Ws)) + 
+  geom_dotplot(binaxis = "y", stackdir = "center",binwidth = .5) + ylab("Weeks") +
+  geom_text(data=num.picks,aes(label=count),nudge_y=3,nudge_x=.1) +
+  scale_x_discrete(labels=c("Weekly\nrepresented\nsupplied","monthly\nrepresented")) +
+  scale_y_continuous(breaks=seq(0,126,14),labels=seq(0,18,2)) + 
+  coord_flip() + ggtitle("Fecal sample with 'one per patient' in each time stage")
+ps
+if(do.write){
+  write.table(select.FDNA.NS.pick2.ID,"../../Result/Phenotype/NPC/select.FDNA.NS.pick2.ID.tsv",quote=F,row.names = F,col.names=F)
+  write.table(FDNA.NS.select[,c("PID","DNAID","Ws","mark","Date","Day")],quote=F,col.names=NA,sep="\t",
+              "../../Result/Phenotype/NPC/select.FDNA.NS.pick2.metadata.tsv")
+  ggsave(ps,width=8,heigh=3.6,
+         filename="../../Result/Phenotype/NPC/fecalSample.selected.pdf")
+}
+```
+
+```{r}
+FDNA.NPC.pick4 <- ddply(FDNA.NS%>%filter(Day%in%seq(-2,2)),c("PID","Day"),RepresentPicking)
+tdat <- FDNA.NPC.pick4%>%filter(Day!="0")
+ggplot(FDNA.NPC.pick4,aes(x=factor(Day),y=shan,fill=factor(Day))) + 
+  stat_compare_means() +
+  geom_boxplot(alpha=.5) + geom_point(alpha=.2) + geom_line(aes(group=PID),alpha=.3) +
+  facet_grid(.~BE3,scale="free")
+```
+
+### export
+```{r export}
+FDNA.NPC.pick2 <- FDNA.NS.pick2%>%filter(Ws=="W1"|during=="tail"&!Ws%in%c("W14","W18"))
+FDNA.NPC.pick3 <- FDNA.NS.pick3%>%filter(Ms=="W1"|during=="tail"&Ms!="M5")
+FDNA.NPC.pick3$Ms <- factor(FDNA.NPC.pick3$Ms,levels=c("M0","W1","M1","M2","M3","M4"))
+if(do.write){
+  save(FDNA.NS,FDNA.NPC.pick2,FDNA.NPC.pick3,FDNA.NS.pick2,FDNA.NS.pick3,
+     file=paste0(OTDIR,"/FDNA.NPC.picks.RData"))
+  tools::md5sum(paste0(OTDIR,"/FDNA.NPC.picks.RData"))
+}
+
+```
+
+
+
